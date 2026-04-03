@@ -1,0 +1,1 @@
+# kospi_ownership_2024-2025
