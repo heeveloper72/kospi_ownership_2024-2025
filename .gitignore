@@ -1,0 +1,28 @@
+# Environment
+.env
+
+# Data (raw and processed are too large for git)
+data/raw/*.csv
+data/raw/*.json
+data/raw/*.xml
+data/raw/*.zip
+data/processed/*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+requests
+pandas
+matplotlib
+plotly
+python-dotenv
+tqdm
