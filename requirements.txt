@@ -4,3 +4,4 @@ matplotlib
 plotly
 python-dotenv
 tqdm
+pytest

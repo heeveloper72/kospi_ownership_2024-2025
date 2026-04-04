@@ -1,0 +1,47 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create .env from secret
+        run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env
+
+      - name: Unit tests (utils + parse_rate)
+        run: pytest tests/test_utils.py -v
+
+      - name: Smoke test - 01_get_corp_list.py (API 키 있을 때만)
+        if: ${{ secrets.DART_API_KEY != '' }}
+        run: python src/01_get_corp_list.py
+
+      - name: Integration test - pipeline (05→06→07)
+        run: pytest tests/test_pipeline.py -v
+
+      - name: Upload output artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: output
+          path: |
+            data/output/*.csv
+            data/output/*.png
+          if-no-files-found: ignore
