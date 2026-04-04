@@ -1,0 +1,106 @@
+name: "Step 3 — 자사주 데이터 수집"
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Step 2 완료 후 활성화 권장 — UTC 01:00 (한국 10:00)
+    - cron: "0 1 * * *"
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Create .env
+        run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env
+
+      - name: Download listed_corps.csv (Step 1 artifact)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/raw
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1-corp-list&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Step 1 아티팩트가 없습니다."
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
+          unzip -o /tmp/step1.zip -d data/raw/
+
+      # 공유 일일 카운터 복원 (Step 2와 같은 날 실행 시 중복 방지)
+      - name: Restore shared daily counter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step2-ownership-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step2.zip
+            unzip -o /tmp/step2.zip ".api_daily_counter.json" -d data/raw/ 2>/dev/null || true
+          fi
+
+      - name: Restore previous treasury data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step3-treasury-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "이전 treasury 데이터 복원 중..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step3.zip
+            unzip -o /tmp/step3.zip -d data/raw/
+          else
+            echo "첫 실행"
+          fi
+
+      - name: Run Step 3
+        run: python src/03_collect_treasury.py
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step3-treasury-data
+          path: |
+            data/raw/treasury_raw.csv
+            data/raw/treasury_checkpoint.json
+            data/raw/.api_daily_counter.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os
+          summary = []
+          try:
+              cp = json.load(open("data/raw/treasury_checkpoint.json"))
+              done = sum(len(v) for v in cp.get("completed", {}).values())
+              summary.append(f"완료: **{done:,}건**")
+          except: pass
+          try:
+              ct = json.load(open("data/raw/.api_daily_counter.json"))
+              summary.append(f"오늘 API 호출: **{ct['calls']:,}/10,000**")
+          except: pass
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("## Step 3 결과\n")
+              for s in summary:
+                  f.write(f"- {s}\n")
+          EOF

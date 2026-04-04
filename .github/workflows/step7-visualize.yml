@@ -1,0 +1,99 @@
+name: "Step 7 — 시각화 & 결과 커밋"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  visualize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 결과 차트를 repo에 커밋하기 위해 write 필요
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # 한글 폰트 설치 (ubuntu-latest에는 기본 없음)
+      - name: Install Korean font
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y fonts-nanum
+          fc-cache -fv
+
+      - name: Download panel data (Step 5 artifact)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/processed data/output
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step5-panel-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Step 5 아티팩트가 없습니다."
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step5.zip
+          unzip -o /tmp/step5.zip -d data/processed/
+
+      - name: Download analysis CSVs (Step 6 artifact)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step6-analysis&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step6.zip
+            unzip -o /tmp/step6.zip -d data/output/
+          fi
+
+      - name: Run Step 7
+        run: python src/07_visualize.py
+
+      - name: Upload chart artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: step7-charts
+          path: data/output/chart*.png
+          retention-days: 90
+          overwrite: true
+
+      # 차트와 분석 CSV를 repo에 커밋 (data/output/은 gitignore 대상이 아님)
+      - name: Commit results to repository
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/output/
+
+          if git diff --cached --quiet; then
+            echo "변경사항 없음 — 커밋 스킵"
+          else
+            CHANGED=$(git diff --cached --name-only | wc -l | tr -d ' ')
+            git commit -m "chore: 분석 결과 업데이트 (차트 ${CHANGED}개) [skip ci]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "결과 커밋 완료"
+          fi
+
+      - name: Summary
+        run: |
+          python - <<'EOF'
+          import os
+          from pathlib import Path
+          charts = sorted(Path("data/output").glob("chart*.png"))
+          lines = ["## Step 7 결과\n", "| 차트 | 크기 |", "|------|------|"]
+          for c in charts:
+              size_kb = c.stat().st_size // 1024
+              lines.append(f"| {c.name} | {size_kb} KB |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines))
+          EOF
