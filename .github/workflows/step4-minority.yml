@@ -3,7 +3,7 @@ name: "Step 4 — 소액주주 데이터 수집"
 on:
   workflow_dispatch:
   schedule:
-    # Step 3 완료 후 활성화 권장 — UTC 01:30 (한국 10:30)
+    # 매일 UTC 01:30 (한국 10:30) — Step 3 미완료 시 자동 스킵됨
     - cron: "30 1 * * *"
 
 jobs:
@@ -41,22 +41,73 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
           unzip -o /tmp/step1.zip -d data/raw/
 
-      # 가장 최근 수집 스크립트의 일일 카운터 복원
-      - name: Restore shared daily counter (Step 3 우선, 없으면 Step 2)
+      # ── Step 3 완료 여부 확인 ────────────────────────────────────────────
+      - name: Check Step 3 completion
+        id: check_step3
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for ARTIFACT_NAME in step3-treasury-data step2-ownership-data; do
-            ARTIFACT_ID=$(gh api \
-              "repos/${{ github.repository }}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=1" \
-              --jq '.artifacts[0].id // empty')
-            if [ -n "$ARTIFACT_ID" ]; then
-              gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/prev.zip
-              unzip -o /tmp/prev.zip ".api_daily_counter.json" -d data/raw/ 2>/dev/null && break || true
-            fi
-          done
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step3-treasury-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "Step 3 artifact 없음 → 스킵"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step3_check.zip
+          mkdir -p /tmp/step3_check
+          unzip -o /tmp/step3_check.zip -d /tmp/step3_check/
+
+          python - <<'PYEOF'
+          import json, sys
+          from pathlib import Path
+
+          cp_path = Path("/tmp/step3_check/treasury_checkpoint.json")
+          corps_path = Path("data/raw/listed_corps.csv")
+
+          if not cp_path.exists():
+              print("체크포인트 없음 → 스킵")
+              Path("/tmp/step3_done").write_text("false")
+              sys.exit(0)
+
+          cp = json.loads(cp_path.read_text())
+          done = sum(len(v) for v in cp.get("completed", {}).values())
+          total_corps = sum(1 for _ in open(corps_path)) - 1
+          total = total_corps * 11
+
+          pct = done / total * 100 if total else 0
+          print(f"Step 3 진행: {done:,}/{total:,} ({pct:.1f}%)")
+
+          if done >= total:
+              print("Step 3 완료 ✓ → Step 4 진행")
+              Path("/tmp/step3_done").write_text("true")
+          else:
+              remaining = total - done
+              print(f"Step 3 미완료 (잔여 {remaining:,}건) → Step 4 스킵")
+              Path("/tmp/step3_done").write_text("false")
+          PYEOF
+
+          STEP3_DONE=$(cat /tmp/step3_done)
+          echo "skip=$([ "$STEP3_DONE" = "true" ] && echo false || echo true)" >> $GITHUB_OUTPUT
+
+      - name: Skip notice
+        if: steps.check_step3.outputs.skip == 'true'
+        run: |
+          echo "⏭️  Step 3가 아직 완료되지 않았습니다. Step 4를 스킵합니다." | tee -a $GITHUB_STEP_SUMMARY
+          echo "Step 3가 모두 완료된 후 Step 4가 자동 시작됩니다." >> $GITHUB_STEP_SUMMARY
+
+      # ── 이후 스텝은 Step 3 완료 시에만 실행 ────────────────────────────
+
+      - name: Restore shared daily counter
+        if: steps.check_step3.outputs.skip == 'false'
+        run: |
+          cp /tmp/step3_check/.api_daily_counter.json data/raw/ 2>/dev/null || true
 
       - name: Restore previous minority data
+        if: steps.check_step3.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,10 +123,11 @@ jobs:
           fi
 
       - name: Run Step 4
+        if: steps.check_step3.outputs.skip == 'false'
         run: python src/04_collect_minority.py
 
       - name: Upload artifact
-        if: always()
+        if: steps.check_step3.outputs.skip == 'false' && always()
         uses: actions/upload-artifact@v4
         with:
           name: step4-minority-data
@@ -87,7 +139,7 @@ jobs:
           overwrite: true
 
       - name: Summary
-        if: always()
+        if: steps.check_step3.outputs.skip == 'false' && always()
         run: |
           python - <<'EOF'
           import json, os

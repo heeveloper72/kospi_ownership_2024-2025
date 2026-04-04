@@ -3,7 +3,7 @@ name: "Step 3 — 자사주 데이터 수집"
 on:
   workflow_dispatch:
   schedule:
-    # Step 2 완료 후 활성화 권장 — UTC 01:00 (한국 10:00)
+    # 매일 UTC 01:00 (한국 10:00) — Step 2 미완료 시 자동 스킵됨
     - cron: "0 1 * * *"
 
 jobs:
@@ -41,20 +41,77 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
           unzip -o /tmp/step1.zip -d data/raw/
 
-      # 공유 일일 카운터 복원 (Step 2와 같은 날 실행 시 중복 방지)
-      - name: Restore shared daily counter
+      # ── Step 2 완료 여부 확인 ────────────────────────────────────────────
+      - name: Check Step 2 completion
+        id: check_step2
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARTIFACT_ID=$(gh api \
             "repos/${{ github.repository }}/actions/artifacts?name=step2-ownership-data&per_page=1" \
             --jq '.artifacts[0].id // empty')
-          if [ -n "$ARTIFACT_ID" ]; then
-            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step2.zip
-            unzip -o /tmp/step2.zip ".api_daily_counter.json" -d data/raw/ 2>/dev/null || true
+
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "Step 2 artifact 없음 → 스킵"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step2_check.zip
+          mkdir -p /tmp/step2_check
+          unzip -o /tmp/step2_check.zip -d /tmp/step2_check/
+
+          python - <<'PYEOF'
+          import json, sys
+          from pathlib import Path
+
+          cp_path = Path("/tmp/step2_check/ownership_checkpoint.json")
+          corps_path = Path("data/raw/listed_corps.csv")
+
+          if not cp_path.exists():
+              print("체크포인트 없음 → 스킵")
+              Path("/tmp/step2_done").write_text("false")
+              sys.exit(0)
+
+          cp = json.loads(cp_path.read_text())
+          done = sum(len(v) for v in cp.get("completed", {}).values())
+          total_corps = sum(1 for _ in open(corps_path)) - 1
+          total = total_corps * 11  # 2015~2025
+
+          pct = done / total * 100 if total else 0
+          print(f"Step 2 진행: {done:,}/{total:,} ({pct:.1f}%)")
+
+          if done >= total:
+              print("Step 2 완료 ✓ → Step 3 진행")
+              Path("/tmp/step2_done").write_text("true")
+          else:
+              remaining = total - done
+              print(f"Step 2 미완료 (잔여 {remaining:,}건) → Step 3 스킵")
+              Path("/tmp/step2_done").write_text("false")
+          PYEOF
+
+          STEP2_DONE=$(cat /tmp/step2_done)
+          echo "skip=$([ "$STEP2_DONE" = "true" ] && echo false || echo true)" >> $GITHUB_OUTPUT
+          echo "Step 2 done=$STEP2_DONE"
+
+      - name: Skip notice
+        if: steps.check_step2.outputs.skip == 'true'
+        run: |
+          echo "⏭️  Step 2가 아직 완료되지 않았습니다. Step 3를 스킵합니다." | tee -a $GITHUB_STEP_SUMMARY
+          echo "Step 2가 모두 완료된 후 Step 3가 자동 시작됩니다." >> $GITHUB_STEP_SUMMARY
+
+      # ── 이후 스텝은 Step 2 완료 시에만 실행 ────────────────────────────
+
+      - name: Restore shared daily counter
+        if: steps.check_step2.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Step 2 artifact에서 오늘 사용한 카운터 복원
+          cp /tmp/step2_check/.api_daily_counter.json data/raw/ 2>/dev/null || true
+
       - name: Restore previous treasury data
+        if: steps.check_step2.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -70,10 +127,11 @@ jobs:
           fi
 
       - name: Run Step 3
+        if: steps.check_step2.outputs.skip == 'false'
         run: python src/03_collect_treasury.py
 
       - name: Upload artifact
-        if: always()
+        if: steps.check_step2.outputs.skip == 'false' && always()
         uses: actions/upload-artifact@v4
         with:
           name: step3-treasury-data
@@ -85,7 +143,7 @@ jobs:
           overwrite: true
 
       - name: Summary
-        if: always()
+        if: steps.check_step2.outputs.skip == 'false' && always()
         run: |
           python - <<'EOF'
           import json, os
