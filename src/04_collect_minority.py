@@ -3,19 +3,22 @@
 
 import logging
 import time
-from pathlib import Path
 
 import pandas as pd
 
 from utils import (
     DATA_RAW,
-    DAILY_LIMIT,
     SLEEP_SEC,
     append_to_csv,
     call_dart_api,
+    is_completed,
+    is_daily_limit_reached,
     load_api_key,
     load_checkpoint,
+    load_daily_counter,
+    mark_completed,
     save_checkpoint,
+    save_daily_counter,
 )
 
 logging.basicConfig(
@@ -45,65 +48,78 @@ def collect_minority() -> None:
     logger.info(f"상장사 {len(corps)}개 로드")
 
     checkpoint = load_checkpoint(CHECKPOINT_PATH)
-    completed_set = set(tuple(x) for x in checkpoint["completed"])
-    calls_today = checkpoint["calls_today"]
+    counter = load_daily_counter()
 
     all_tasks = [
         (row["corp_code"], row["corp_name"], row["market"], str(year))
         for _, row in corps.iterrows()
         for year in YEARS
     ]
-    remaining = [t for t in all_tasks if (t[0], t[3]) not in completed_set]
     total = len(all_tasks)
+    remaining = [t for t in all_tasks if not is_completed(checkpoint, t[0], t[3])]
     done = total - len(remaining)
 
     logger.info(f"전체 {total}건 중 완료 {done}건, 잔여 {len(remaining)}건")
-    logger.info(f"오늘 API 호출: {calls_today}/{DAILY_LIMIT}")
+    logger.info(f"오늘 API 호출(전체 스크립트 합산): {counter['calls']}/10,000")
 
-    for corp_code, corp_name, market, year in remaining:
-        if calls_today >= DAILY_LIMIT:
-            logger.warning(f"일일 한도 {DAILY_LIMIT}건 도달. 자동 중단.")
-            break
+    processed_this_run = 0
+    try:
+        for corp_code, corp_name, market, year in remaining:
+            if is_daily_limit_reached(counter):
+                logger.warning(
+                    f"일일 한도 도달 — 잔여 {total - done}건. "
+                    "내일 재실행하면 이어서 진행됩니다."
+                )
+                break
 
-        data = call_dart_api("mrhlSttus", api_key, {
-            "corp_code": corp_code,
-            "bsns_year": year,
-            "reprt_code": "11011",
-        })
-        calls_today += 1
+            data = call_dart_api("mrhlSttus", api_key, {
+                "corp_code": corp_code,
+                "bsns_year": year,
+                "reprt_code": "11011",
+            })
+            counter["calls"] += 1
+            processed_this_run += 1
 
-        if data and "list" in data:
-            rows = []
-            for item in data["list"]:
-                rows.append({
-                    "corp_code": corp_code,
-                    "corp_name": corp_name,
-                    "market": market,
-                    "year": year,
-                    "se": item.get("se", ""),
-                    "shrholdr_co": item.get("shrholdr_co", ""),
-                    "shrholdr_tot_co": item.get("shrholdr_tot_co", ""),
-                    "shrholdr_rate": item.get("shrholdr_rate", ""),
-                    "hold_stock_co": item.get("hold_stock_co", ""),
-                    "stock_tot_co": item.get("stock_tot_co", ""),
-                    "hold_stock_rate": item.get("hold_stock_rate", ""),
-                })
-            append_to_csv(OUTPUT_PATH, rows, FIELDNAMES)
+            if data and "list" in data:
+                rows = [
+                    {
+                        "corp_code": corp_code,
+                        "corp_name": corp_name,
+                        "market": market,
+                        "year": year,
+                        "se": item.get("se", ""),
+                        "shrholdr_co": item.get("shrholdr_co", ""),
+                        "shrholdr_tot_co": item.get("shrholdr_tot_co", ""),
+                        "shrholdr_rate": item.get("shrholdr_rate", ""),
+                        "hold_stock_co": item.get("hold_stock_co", ""),
+                        "stock_tot_co": item.get("stock_tot_co", ""),
+                        "hold_stock_rate": item.get("hold_stock_rate", ""),
+                    }
+                    for item in data["list"]
+                ]
+                append_to_csv(OUTPUT_PATH, rows, FIELDNAMES)
 
-        checkpoint["completed"].append([corp_code, year])
-        completed_set.add((corp_code, year))
-        checkpoint["calls_today"] = calls_today
-        done += 1
+            mark_completed(checkpoint, corp_code, year)
+            done += 1
 
-        if done % 100 == 0:
-            save_checkpoint(CHECKPOINT_PATH, checkpoint)
-            pct = done / total * 100
-            logger.info(f"진행: {done}/{total} ({pct:.1f}%) | 오늘 호출: {calls_today}")
+            if processed_this_run % 100 == 0:
+                save_checkpoint(CHECKPOINT_PATH, checkpoint)
+                save_daily_counter(counter)
+                logger.info(
+                    f"진행: {done}/{total} ({done / total * 100:.1f}%) "
+                    f"| 오늘 호출: {counter['calls']}"
+                )
 
-        time.sleep(SLEEP_SEC)
+            time.sleep(SLEEP_SEC)
 
-    save_checkpoint(CHECKPOINT_PATH, checkpoint)
-    logger.info(f"완료. 총 {done}/{total}건 처리, 오늘 API 호출: {calls_today}")
+    finally:
+        save_checkpoint(CHECKPOINT_PATH, checkpoint)
+        save_daily_counter(counter)
+        logger.info(
+            f"체크포인트 저장 완료. "
+            f"이번 실행 {processed_this_run}건 처리 | "
+            f"전체 진행: {done}/{total} | 오늘 호출: {counter['calls']}"
+        )
 
 
 def main() -> None:

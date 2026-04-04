@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-# src/ 경로를 sys.path에 추가
 SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 sys.path.insert(0, str(SRC_DIR))
 
@@ -21,41 +20,96 @@ import utils
 class TestCheckpoint:
     def test_load_missing_file_returns_defaults(self, tmp_path):
         cp = utils.load_checkpoint(tmp_path / "no_such.json")
-        assert cp["completed"] == []
-        assert cp["calls_today"] == 0
+        assert cp["completed"] == {}
         assert cp["date"] == str(date.today())
 
-    def test_load_existing_same_date(self, tmp_path):
+    def test_load_existing_dict_format(self, tmp_path):
         path = tmp_path / "cp.json"
         data = {
-            "completed": [["A001", "2023"]],
+            "completed": {"A001": ["2023", "2022"]},
+            "date": str(date.today()),
+        }
+        path.write_text(json.dumps(data), encoding="utf-8")
+        cp = utils.load_checkpoint(path)
+        assert cp["completed"]["A001"] == ["2023", "2022"]
+
+    def test_load_old_list_format_auto_converts(self, tmp_path):
+        """구 형식(list of pairs)을 자동으로 dict로 변환."""
+        path = tmp_path / "cp.json"
+        data = {
+            "completed": [["A001", "2023"], ["A001", "2022"], ["B002", "2023"]],
             "calls_today": 500,
             "date": str(date.today()),
         }
         path.write_text(json.dumps(data), encoding="utf-8")
         cp = utils.load_checkpoint(path)
-        assert cp["calls_today"] == 500
-
-    def test_load_old_date_resets_calls_today(self, tmp_path):
-        path = tmp_path / "cp.json"
-        yesterday = str(date.today() - timedelta(days=1))
-        data = {
-            "completed": [["A001", "2023"]],
-            "calls_today": 9999,
-            "date": yesterday,
-        }
-        path.write_text(json.dumps(data), encoding="utf-8")
-        cp = utils.load_checkpoint(path)
-        assert cp["calls_today"] == 0
-        assert cp["date"] == str(date.today())
+        assert isinstance(cp["completed"], dict)
+        assert "2023" in cp["completed"]["A001"]
+        assert "2022" in cp["completed"]["A001"]
+        assert "2023" in cp["completed"]["B002"]
 
     def test_save_and_reload(self, tmp_path):
         path = tmp_path / "cp.json"
-        cp = {"completed": [["B001", "2022"]], "calls_today": 42, "date": "2099-01-01"}
+        cp = {"completed": {"B001": ["2022"]}, "date": "2099-01-01"}
         utils.save_checkpoint(path, cp)
         loaded = json.loads(path.read_text(encoding="utf-8"))
-        assert loaded["calls_today"] == 42
-        assert loaded["completed"] == [["B001", "2022"]]
+        assert loaded["completed"]["B001"] == ["2022"]
+
+
+# ─────────────────────────────────────────────
+# mark_completed / is_completed
+# ─────────────────────────────────────────────
+
+class TestCompletedHelpers:
+    def test_mark_and_check(self):
+        cp = {"completed": {}}
+        utils.mark_completed(cp, "A001", "2023")
+        assert utils.is_completed(cp, "A001", "2023")
+        assert not utils.is_completed(cp, "A001", "2022")
+        assert not utils.is_completed(cp, "B002", "2023")
+
+    def test_mark_idempotent(self):
+        cp = {"completed": {}}
+        utils.mark_completed(cp, "A001", "2023")
+        utils.mark_completed(cp, "A001", "2023")
+        assert cp["completed"]["A001"].count("2023") == 1
+
+
+# ─────────────────────────────────────────────
+# load_daily_counter / save_daily_counter
+# ─────────────────────────────────────────────
+
+class TestDailyCounter:
+    def test_missing_returns_zero(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(utils, "DAILY_COUNTER_PATH", tmp_path / "counter.json")
+        monkeypatch.setattr(utils, "DATA_RAW", tmp_path)
+        counter = utils.load_daily_counter()
+        assert counter["calls"] == 0
+        assert counter["date"] == str(date.today())
+
+    def test_old_date_resets(self, tmp_path, monkeypatch):
+        counter_path = tmp_path / "counter.json"
+        monkeypatch.setattr(utils, "DAILY_COUNTER_PATH", counter_path)
+        monkeypatch.setattr(utils, "DATA_RAW", tmp_path)
+        counter_path.write_text(
+            json.dumps({"date": "2000-01-01", "calls": 9999}), encoding="utf-8"
+        )
+        counter = utils.load_daily_counter()
+        assert counter["calls"] == 0
+
+    def test_save_and_reload(self, tmp_path, monkeypatch):
+        counter_path = tmp_path / "counter.json"
+        monkeypatch.setattr(utils, "DAILY_COUNTER_PATH", counter_path)
+        monkeypatch.setattr(utils, "DATA_RAW", tmp_path)
+        counter = {"date": str(date.today()), "calls": 42}
+        utils.save_daily_counter(counter)
+        reloaded = utils.load_daily_counter()
+        assert reloaded["calls"] == 42
+
+    def test_is_daily_limit_reached(self):
+        assert utils.is_daily_limit_reached({"calls": 10000})
+        assert utils.is_daily_limit_reached({"calls": 99999})
+        assert not utils.is_daily_limit_reached({"calls": 9999})
 
 
 # ─────────────────────────────────────────────
@@ -75,18 +129,13 @@ class TestAppendToCsv:
 
     def test_appends_without_duplicate_header(self, tmp_path):
         path = tmp_path / "out.csv"
-        rows1 = [{"corp_code": "001", "name": "A", "value": "1"}]
-        rows2 = [{"corp_code": "002", "name": "B", "value": "2"}]
-        utils.append_to_csv(path, rows1, self.FIELDS)
-        utils.append_to_csv(path, rows2, self.FIELDS)
+        utils.append_to_csv(path, [{"corp_code": "001", "name": "A", "value": "1"}], self.FIELDS)
+        utils.append_to_csv(path, [{"corp_code": "002", "name": "B", "value": "2"}], self.FIELDS)
         lines = [l for l in path.read_text(encoding="utf-8-sig").strip().splitlines() if l]
-        # 헤더 1줄 + 데이터 2줄 = 3줄
-        assert len(lines) == 3
+        assert len(lines) == 3  # 헤더 1 + 데이터 2
 
     def test_empty_rows_does_not_crash(self, tmp_path):
-        path = tmp_path / "out.csv"
-        utils.append_to_csv(path, [], self.FIELDS)
-        # 파일 없거나 빈 상태여도 오류 없어야 함
+        utils.append_to_csv(tmp_path / "out.csv", [], self.FIELDS)
 
 
 # ─────────────────────────────────────────────
@@ -98,8 +147,7 @@ class TestParseRate:
     def import_parse_rate(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "clean_merge",
-            SRC_DIR / "05_clean_merge.py",
+            "clean_merge", SRC_DIR / "05_clean_merge.py"
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)

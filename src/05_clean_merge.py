@@ -69,12 +69,13 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
 
 
 def process_treasury(df_tres: pd.DataFrame) -> pd.DataFrame:
-    """treasury_raw.csv에서 자사주 비율 추출."""
+    """treasury_raw.csv에서 자사주 비율 추출. 보통주(普通株)만 집계."""
+    # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
+    df_tres = df_tres[df_tres["stock_knd"].str.contains("보통주", na=False)].copy()
     df_tres["trmend_rate_f"] = df_tres["trmend_rate"].apply(parse_rate)
 
     results = []
     for (corp_code, year), grp in df_tres.groupby(["corp_code", "year"]):
-        # 보통주 자사주 비율 합산
         treasury_pct = grp["trmend_rate_f"].sum()
         results.append({
             "corp_code": corp_code,
