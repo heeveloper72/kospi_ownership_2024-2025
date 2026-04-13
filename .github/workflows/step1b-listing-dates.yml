@@ -1,0 +1,87 @@
+name: "Step 1b — KRX 상장일 수집"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Download listed_corps.csv (Step 1 artifact)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/raw
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1-corp-list&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Step 1 아티팩트가 없습니다. 먼저 Step 1을 실행하세요."
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
+          unzip -o /tmp/step1.zip -d data/raw/
+          echo "로드 완료: $(tail -n +2 data/raw/listed_corps.csv | wc -l)개사"
+
+      - name: Run Step 1b — KRX 상장일 수집
+        run: python src/01b_get_listing_dates.py
+
+      - name: Verify isu_dt column
+        run: |
+          python - <<'EOF'
+          import pandas as pd
+          df = pd.read_csv("data/raw/listed_corps.csv", dtype=str)
+          if "isu_dt" in df.columns:
+              matched = df["isu_dt"].notna().sum()
+              print(f"상장일 매칭: {matched}/{len(df)} ({matched/len(df)*100:.1f}%)")
+              print(df[["corp_name", "market", "isu_dt"]].head(10).to_string())
+          else:
+              print("::error::isu_dt 컬럼이 없습니다.")
+              exit(1)
+          EOF
+
+      # Step 1 아티팩트에 isu_dt 추가된 listed_corps.csv 덮어쓰기
+      - name: Upload updated Step 1 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: step1-corp-list
+          path: |
+            data/raw/listed_corps.csv
+            data/raw/corp_cls_checkpoint.json
+            data/raw/corp_info_checkpoint.json
+            data/raw/.api_daily_counter.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import pandas as pd, os
+          df = pd.read_csv("data/raw/listed_corps.csv", dtype=str)
+          matched = df["isu_dt"].notna().sum() if "isu_dt" in df.columns else 0
+          post2014 = (df["isu_dt"].fillna("") >= "20140701").sum() if "isu_dt" in df.columns else "?"
+          lines = [
+              "## Step 1b 결과 — KRX 상장일",
+              "| 항목 | 값 |",
+              "|------|---|",
+              f"| 전체 기업 수 | {len(df):,}개 |",
+              f"| isu_dt 매칭 성공 | {matched:,}개 ({matched/len(df)*100:.1f}%) |",
+              f"| 2014.7 이후 상장 (post2014 대상) | {post2014:,}개 |",
+          ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("\n".join(lines))
+          EOF

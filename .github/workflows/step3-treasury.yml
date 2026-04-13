@@ -110,7 +110,7 @@ jobs:
           # Step 2 artifact에서 오늘 사용한 카운터 복원
           cp /tmp/step2_check/.api_daily_counter.json data/raw/ 2>/dev/null || true
 
-      - name: Restore previous treasury data
+      - name: Restore previous treasury + total_shares data
         if: steps.check_step2.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -126,9 +126,13 @@ jobs:
             echo "첫 실행"
           fi
 
-      - name: Run Step 3
+      - name: Run Step 3 — 자사주 수량 수집
         if: steps.check_step2.outputs.skip == 'false'
         run: python src/03_collect_treasury.py
+
+      - name: Run Step 3b — 총발행주식수 수집
+        if: steps.check_step2.outputs.skip == 'false'
+        run: python src/03b_collect_total_shares.py
 
       - name: Upload artifact
         if: steps.check_step2.outputs.skip == 'false' && always()
@@ -138,6 +142,8 @@ jobs:
           path: |
             data/raw/treasury_raw.csv
             data/raw/treasury_checkpoint.json
+            data/raw/total_shares_raw.csv
+            data/raw/total_shares_checkpoint.json
             data/raw/.api_daily_counter.json
           retention-days: 90
           overwrite: true
@@ -151,7 +157,12 @@ jobs:
           try:
               cp = json.load(open("data/raw/treasury_checkpoint.json"))
               done = sum(len(v) for v in cp.get("completed", {}).values())
-              summary.append(f"완료: **{done:,}건**")
+              summary.append(f"자사주 완료: **{done:,}건**")
+          except: pass
+          try:
+              cp = json.load(open("data/raw/total_shares_checkpoint.json"))
+              done = sum(len(v) for v in cp.get("completed", {}).values())
+              summary.append(f"총발행주식수 완료: **{done:,}건**")
           except: pass
           try:
               ct = json.load(open("data/raw/.api_daily_counter.json"))

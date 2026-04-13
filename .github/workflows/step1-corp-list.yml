@@ -52,6 +52,7 @@ jobs:
           path: |
             data/raw/listed_corps.csv
             data/raw/corp_cls_checkpoint.json
+            data/raw/corp_info_checkpoint.json
             data/raw/.api_daily_counter.json
           retention-days: 90
           overwrite: true
