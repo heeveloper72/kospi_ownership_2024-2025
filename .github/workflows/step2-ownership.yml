@@ -2,6 +2,11 @@ name: "Step 2 — 최대주주 데이터 수집"
 
 on:
   workflow_dispatch:
+    inputs:
+      force_reset:
+        description: "기존 ownership 데이터 삭제 후 전체 재수집 (잘못된 이전 데이터 교체 시 사용)"
+        type: boolean
+        default: false
   schedule:
     # 매일 UTC 00:30 (한국 09:30) 자동 실행
     - cron: "30 0 * * *"
@@ -51,7 +56,19 @@ jobs:
       - name: Restore previous ownership data (체크포인트 + CSV)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_RESET: ${{ github.event_name == 'workflow_dispatch' && inputs.force_reset == true }}
         run: |
+          if [ "$FORCE_RESET" = "true" ]; then
+            echo "⚠️  force_reset=true — 기존 아티팩트 복원 건너뜀"
+            mkdir -p data/raw
+            # 체크포인트를 빈 상태로 초기화 (이전 '완료' 기록 제거)
+            echo '{"completed": {}}' > data/raw/ownership_checkpoint.json
+            # 잘못된 CSV 파일 삭제 (없으면 무시)
+            rm -f data/raw/ownership_raw.csv
+            echo "✅ ownership_checkpoint.json 초기화 완료 — 전체 재수집 시작"
+            exit 0
+          fi
+
           ARTIFACT_ID=$(gh api \
             "repos/${{ github.repository }}/actions/artifacts?name=step2-ownership-data&per_page=1" \
             --jq '.artifacts[0].id // empty')
