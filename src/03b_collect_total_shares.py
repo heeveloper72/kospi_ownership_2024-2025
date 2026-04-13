@@ -34,13 +34,23 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_PATH = DATA_RAW / "total_shares_checkpoint.json"
 OUTPUT_PATH = DATA_RAW / "total_shares_raw.csv"
 YEARS = list(range(2015, 2026))
+
+# stockTotqySttus 공식 응답 필드 (DART OpenAPI DS002/2020002).
+# 실제 필드명이 카나리아 검증에서 확인되기 전까지 여러 후보를 모두 저장.
+# - isu_stock_totqy:          발행할 주식의 총수 (정관상 한도)
+# - now_to_isu_stock_totqy:   현재까지 발행한 주식의 총수 (발행누적)
+# - redc_stock_totqy:         감소한 주식의 총수 (감자·소각)
+# - now_to_redc_stock_totqy:  현재까지 감소한 주식의 총수
+# - istc_totqy:               유통주식총수 (현재 발행주식 = 발행누적 − 감소누적)
 FIELDNAMES = [
     "corp_code", "corp_name", "market", "year",
-    "se", "isu_stock_totqy",
+    "se",
+    "isu_stock_totqy",
+    "now_to_isu_stock_totqy",
+    "redc_stock_totqy",
+    "now_to_redc_stock_totqy",
+    "istc_totqy",
 ]
-
-# stockTotqySttus 응답에서 "발행한 주식의 총수"에 해당하는 구분값
-ISSUED_TOTAL_SE = "발행한 주식의 총수"
 
 
 def collect_total_shares() -> None:
@@ -94,7 +104,11 @@ def collect_total_shares() -> None:
                         "market": market,
                         "year": year,
                         "se": item.get("se", ""),
-                        "isu_stock_totqy": item.get("isu_stock_totqy", ""),
+                        "isu_stock_totqy":         item.get("isu_stock_totqy", ""),
+                        "now_to_isu_stock_totqy":  item.get("now_to_isu_stock_totqy", ""),
+                        "redc_stock_totqy":        item.get("redc_stock_totqy", ""),
+                        "now_to_redc_stock_totqy": item.get("now_to_redc_stock_totqy", ""),
+                        "istc_totqy":              item.get("istc_totqy", ""),
                     }
                     for item in data["list"]
                 ]

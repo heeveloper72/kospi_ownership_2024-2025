@@ -7,3 +7,6 @@ tqdm
 pytest
 pykrx
 scikit-learn
+lxml
+html5lib
+beautifulsoup4

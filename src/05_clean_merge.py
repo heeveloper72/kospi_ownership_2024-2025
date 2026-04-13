@@ -68,6 +68,54 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
+def _parse_count(val: object) -> float:
+    """주식 수량 문자열(콤마·공백 포함) → float. 변환 불가 시 NaN."""
+    if pd.isna(val):
+        return np.nan
+    s = str(val).strip().replace(",", "").replace(" ", "")
+    if s in ("", "-"):
+        return np.nan
+    try:
+        return float(s)
+    except ValueError:
+        return np.nan
+
+
+def _pick_total_shares(row: pd.Series) -> float:
+    """stockTotqySttus 응답의 여러 필드 중 실제 '발행주식 총수'에 해당하는 값 선택.
+
+    우선순위:
+      1) istc_totqy (유통주식총수 = 발행누적 − 감소누적, 가장 정확한 '현재 발행주식')
+      2) now_to_isu_stock_totqy − now_to_redc_stock_totqy (있으면)
+      3) now_to_isu_stock_totqy (감소분 없을 때)
+      4) isu_stock_totqy (정관상 한도이지만 최후의 폴백)
+    """
+    candidates = {
+        "istc_totqy":              _parse_count(row.get("istc_totqy", "")),
+        "now_to_isu":              _parse_count(row.get("now_to_isu_stock_totqy", "")),
+        "now_to_redc":             _parse_count(row.get("now_to_redc_stock_totqy", "")),
+        "isu_stock_totqy":         _parse_count(row.get("isu_stock_totqy", "")),
+    }
+
+    # 1순위: istc_totqy
+    if not np.isnan(candidates["istc_totqy"]) and candidates["istc_totqy"] > 0:
+        return candidates["istc_totqy"]
+
+    # 2·3순위: 발행누적 − 감소누적
+    if not np.isnan(candidates["now_to_isu"]) and candidates["now_to_isu"] > 0:
+        redc = candidates["now_to_redc"] if not np.isnan(candidates["now_to_redc"]) else 0.0
+        diff = candidates["now_to_isu"] - redc
+        if diff > 0:
+            return diff
+        return candidates["now_to_isu"]
+
+    # 4순위: isu_stock_totqy (폴백)
+    if not np.isnan(candidates["isu_stock_totqy"]) and candidates["isu_stock_totqy"] > 0:
+        return candidates["isu_stock_totqy"]
+
+    return np.nan
+
+
 def process_treasury(
     df_tres: pd.DataFrame,
     df_shares: pd.DataFrame | None = None,
@@ -79,22 +127,22 @@ def process_treasury(
     """
     # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
     df_tres = df_tres[df_tres["stock_knd"].str.contains("보통주", na=False)].copy()
-    df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(
-        lambda x: parse_rate(str(x).replace(",", ""))
-    )
+    df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(_parse_count)
 
     # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares
     shares_dict: dict[tuple[str, str], float] = {}
     if df_shares is not None and not df_shares.empty:
-        # se == "발행한 주식의 총수" 행만 사용
-        mask_issued = df_shares["se"].str.contains("발행한 주식", na=False)
+        # '발행한 주식의 총수' 구분 정확 일치 (부분일치는 '발행한 주식의 증감내역' 등을 오염시킬 수 있음)
+        se_clean = df_shares["se"].fillna("").astype(str).str.strip()
+        mask_issued = se_clean == "발행한 주식의 총수"
+        if mask_issued.sum() == 0:
+            # 폴백: 정확 일치 행이 없을 때 '주식의 총수' 포함 행 사용
+            mask_issued = se_clean.str.contains("주식의 총수", na=False)
+
         df_issued = df_shares[mask_issued].copy()
-        df_issued["total_f"] = df_issued["isu_stock_totqy"].apply(
-            lambda x: parse_rate(str(x).replace(",", ""))
-        )
         for _, row in df_issued.iterrows():
             key = (str(row["corp_code"]), str(row["year"]))
-            val = row["total_f"]
+            val = _pick_total_shares(row)
             if not np.isnan(val) and val > 0:
                 shares_dict[key] = val
 

@@ -60,14 +60,41 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          if [ -f data/raw/listed_corps.csv ]; then
-            TOTAL=$(tail -n +2 data/raw/listed_corps.csv | wc -l)
-            KOSPI=$(grep ",KOSPI" data/raw/listed_corps.csv | wc -l)
-            KOSDAQ=$(grep ",KOSDAQ" data/raw/listed_corps.csv | wc -l)
-            echo "## Step 1 결과" >> $GITHUB_STEP_SUMMARY
-            echo "| 시장 | 기업 수 |" >> $GITHUB_STEP_SUMMARY
-            echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
-            echo "| KOSPI | $KOSPI |" >> $GITHUB_STEP_SUMMARY
-            echo "| KOSDAQ | $KOSDAQ |" >> $GITHUB_STEP_SUMMARY
-            echo "| **합계** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
-          fi
+          python - <<'EOF'
+          import os
+          from pathlib import Path
+
+          csv_path = Path("data/raw/listed_corps.csv")
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if not csv_path.exists() or not summary_path:
+              raise SystemExit(0)
+
+          try:
+              import pandas as pd
+              df = pd.read_csv(csv_path, dtype=str)
+          except Exception as e:
+              with open(summary_path, "a") as f:
+                  f.write(f"## Step 1 결과\n\n- CSV 로드 실패: {e}\n")
+              raise SystemExit(0)
+
+          total = len(df)
+          kospi = int((df.get("market", pd.Series([], dtype=str)) == "KOSPI").sum())
+          kosdaq = int((df.get("market", pd.Series([], dtype=str)) == "KOSDAQ").sum())
+
+          est_dt_filled = int(df["est_dt"].fillna("").str.strip().astype(bool).sum()) if "est_dt" in df.columns else 0
+          induty_filled = int(df["induty_code"].fillna("").str.strip().astype(bool).sum()) if "induty_code" in df.columns else 0
+
+          lines = [
+              "## Step 1 결과",
+              "| 항목 | 값 |",
+              "|------|---|",
+              f"| KOSPI | {kospi:,}개 |",
+              f"| KOSDAQ | {kosdaq:,}개 |",
+              f"| **합계** | **{total:,}개** |",
+              f"| est_dt 수집 | {est_dt_filled:,}/{total:,} |",
+              f"| induty_code 수집 | {induty_filled:,}/{total:,} |",
+              "",
+          ]
+          with open(summary_path, "a") as f:
+              f.write("\n".join(lines))
+          EOF

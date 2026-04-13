@@ -27,8 +27,18 @@ REQUIRED_FIELDS = {
     "hyslrSttus": ["nm", "relate", "trmend_posesn_stock_co", "trmend_posesn_stock_qota_rt"],
     "tesstkAcqsDspsSttus": ["stock_knd", "bsis_qy", "trmend_qy"],
     "mrhlSttus": ["se", "shrholdr_co", "hold_stock_rate"],
-    "stockTotqySttus": ["se", "isu_stock_totqy"],
+    # stockTotqySttus: se 필드 필수, 수량 필드는 여러 후보 중 하나라도 있으면 통과
+    "stockTotqySttus": ["se"],
 }
+
+# stockTotqySttus 의 수량 필드 후보 (하나 이상 실제 값이 있어야 함)
+STOCK_QTY_CANDIDATES = [
+    "isu_stock_totqy",
+    "now_to_isu_stock_totqy",
+    "redc_stock_totqy",
+    "now_to_redc_stock_totqy",
+    "istc_totqy",
+]
 
 
 def validate_ownership() -> bool:
@@ -240,18 +250,42 @@ def validate_total_shares() -> bool:
                     missing_fields.append(field)
 
         if missing_fields:
-            logger.error(f"  ❌ 필드 누락: {missing_fields}")
+            logger.error(f"  ❌ 필수 필드 누락: {missing_fields}")
             logger.error(f"     사용 가능한 모든 키: {sorted(data['list'][0].keys())}")
             all_passed = False
+            continue
+
+        # "발행한 주식의 총수" 행에서 수량 필드 후보 확인
+        se_list = [str(i.get("se", "")).strip() for i in data["list"]]
+        logger.info(f"  se 값 목록: {se_list}")
+
+        issued_rows = [i for i in data["list"] if str(i.get("se", "")).strip() == "발행한 주식의 총수"]
+        if not issued_rows:
+            # 폴백: 부분일치
+            issued_rows = [i for i in data["list"] if "주식의 총수" in str(i.get("se", ""))]
+
+        if not issued_rows:
+            logger.warning(f"  ⚠️  '발행한 주식의 총수' 행 없음.")
+            all_passed = False
+            continue
+
+        # 수량 필드 후보 중 하나라도 비어있지 않으면 OK
+        row = issued_rows[0]
+        qty_values = {
+            field: row.get(field, "") for field in STOCK_QTY_CANDIDATES
+        }
+        logger.info(f"  수량 필드 값:")
+        for field, val in qty_values.items():
+            status = "✓" if val not in ("", None) else "공란"
+            logger.info(f"    {field:30s} = {val!r} [{status}]")
+
+        has_value = any(v not in ("", None) for v in qty_values.values())
+        if has_value:
+            logger.info(f"  ✅ 수량 필드 후보 중 값 있음 — 05_clean_merge에서 자동 선택")
         else:
-            # "발행한 주식의 총수" 행 확인
-            issued_rows = [i for i in data["list"] if "발행한" in i.get("se", "")]
-            if issued_rows:
-                logger.info(f"  ✅ '발행한 주식의 총수' 행 확인: isu_stock_totqy = {issued_rows[0].get('isu_stock_totqy', '?')}")
-            else:
-                ses = [i.get("se", "") for i in data["list"]]
-                logger.warning(f"  ⚠️  '발행한 주식의 총수' 행 없음. se 값들: {ses}")
-            logger.info(f"  ✅ 필드 존재 확인 완료")
+            logger.error(f"  ❌ 수량 필드 후보 전부 공란")
+            logger.error(f"     전체 row 키: {sorted(row.keys())}")
+            all_passed = False
 
     return all_passed
 

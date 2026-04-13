@@ -102,13 +102,18 @@ def fetch_corp_cls(
     """company.json API로 corp_cls·est_dt·induty_code 확인. 체크포인트 지원."""
     cls_map = load_cls_checkpoint()
     info_map = load_corp_info_checkpoint()
-    # 둘 다 완료된 것만 건너뜀
-    remaining = [c for c in corps if c["corp_code"] not in cls_map]
+    # cls_map OR info_map 중 하나라도 누락된 기업은 재조회 대상
+    # (이전 실행이 corp_cls만 저장하고 info는 수집 안했을 가능성 대비)
+    remaining = [
+        c for c in corps
+        if c["corp_code"] not in cls_map or c["corp_code"] not in info_map
+    ]
 
+    already_done = len(corps) - len(remaining)
     counter = load_daily_counter()
     logger.info(
         f"corp_cls 조회 대상: {len(remaining)}개 "
-        f"(이미 완료: {len(cls_map)}개) | "
+        f"(이미 완료: {already_done}개) | "
         f"오늘 API 호출: {counter['calls']}/{10_000}"
     )
 
@@ -123,7 +128,10 @@ def fetch_corp_cls(
 
             data = call_dart_api("company", api_key, {"corp_code": corp["corp_code"]})
             counter["calls"] += 1
-            cls_map[corp["corp_code"]] = data.get("corp_cls", "") if data else ""
+            # cls_map 은 이미 있으면 덮어쓰지 않음 (값 있는 결과 보존)
+            if corp["corp_code"] not in cls_map:
+                cls_map[corp["corp_code"]] = data.get("corp_cls", "") if data else ""
+            # info_map 은 매번 갱신 (신규 필드 추가 목적)
             info_map[corp["corp_code"]] = {
                 "est_dt": data.get("est_dt", "") if data else "",
                 "induty_code": data.get("induty_code", "") if data else "",

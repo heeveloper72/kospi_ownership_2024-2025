@@ -70,17 +70,41 @@ jobs:
         if: always()
         run: |
           python - <<'EOF'
-          import pandas as pd, os
-          df = pd.read_csv("data/raw/listed_corps.csv", dtype=str)
-          matched = df["isu_dt"].notna().sum() if "isu_dt" in df.columns else 0
-          post2014 = (df["isu_dt"].fillna("") >= "20140701").sum() if "isu_dt" in df.columns else "?"
+          import pandas as pd, os, re
+          try:
+              df = pd.read_csv("data/raw/listed_corps.csv", dtype=str)
+          except Exception as e:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                  f.write(f"## Step 1b 결과\n\n- CSV 로드 실패: {e}\n")
+              raise SystemExit(0)
+
+          total = len(df)
+          matched_str = "N/A"
+          post2014_str = "N/A"
+          sample = "N/A"
+
+          if "isu_dt" in df.columns:
+              # YYYYMMDD 8자리 숫자만 유효로 간주
+              isu_clean = df["isu_dt"].fillna("").astype(str)
+              valid_mask = isu_clean.str.match(r"^\d{8}$")
+              valid_isu = isu_clean.where(valid_mask, "")
+
+              matched = int(valid_mask.sum())
+              post2014 = int((valid_isu >= "20140701").sum())
+              matched_str = f"{matched:,}개 ({matched/total*100:.1f}%)" if total else "N/A"
+              post2014_str = f"{post2014:,}개"
+              non_empty = df.loc[valid_mask, "isu_dt"].head(3).tolist()
+              sample = ", ".join(non_empty) if non_empty else "없음"
+
           lines = [
               "## Step 1b 결과 — KRX 상장일",
               "| 항목 | 값 |",
               "|------|---|",
-              f"| 전체 기업 수 | {len(df):,}개 |",
-              f"| isu_dt 매칭 성공 | {matched:,}개 ({matched/len(df)*100:.1f}%) |",
-              f"| 2014.7 이후 상장 (post2014 대상) | {post2014:,}개 |",
+              f"| 전체 기업 수 | {total:,}개 |",
+              f"| isu_dt 매칭 성공 | {matched_str} |",
+              f"| 2014.7 이후 상장 (post2014 대상) | {post2014_str} |",
+              f"| isu_dt 샘플 | {sample} |",
+              "",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("\n".join(lines))
