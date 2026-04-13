@@ -68,15 +68,46 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(results)
 
 
-def process_treasury(df_tres: pd.DataFrame) -> pd.DataFrame:
-    """treasury_raw.csv에서 자사주 비율 추출. 보통주(普通株)만 집계."""
+def process_treasury(
+    df_tres: pd.DataFrame,
+    df_shares: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """treasury_raw.csv에서 자사주 비율 계산. 보통주(普通株)만 집계.
+
+    비율 = trmend_qy(기말 자사주 수량) / 총발행주식수 * 100
+    df_shares: total_shares_raw.csv 로드 결과 (없으면 NaN)
+    """
     # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
     df_tres = df_tres[df_tres["stock_knd"].str.contains("보통주", na=False)].copy()
-    df_tres["trmend_rate_f"] = df_tres["trmend_rate"].apply(parse_rate)
+    df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(
+        lambda x: parse_rate(str(x).replace(",", ""))
+    )
+
+    # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares
+    shares_dict: dict[tuple[str, str], float] = {}
+    if df_shares is not None and not df_shares.empty:
+        # se == "발행한 주식의 총수" 행만 사용
+        mask_issued = df_shares["se"].str.contains("발행한 주식", na=False)
+        df_issued = df_shares[mask_issued].copy()
+        df_issued["total_f"] = df_issued["isu_stock_totqy"].apply(
+            lambda x: parse_rate(str(x).replace(",", ""))
+        )
+        for _, row in df_issued.iterrows():
+            key = (str(row["corp_code"]), str(row["year"]))
+            val = row["total_f"]
+            if not np.isnan(val) and val > 0:
+                shares_dict[key] = val
 
     results = []
     for (corp_code, year), grp in df_tres.groupby(["corp_code", "year"]):
-        treasury_pct = grp["trmend_rate_f"].sum()
+        trmend_qy = grp["trmend_qy_f"].sum()
+        total_shares = shares_dict.get((str(corp_code), str(year)), np.nan)
+
+        if np.isnan(total_shares) or total_shares <= 0:
+            treasury_pct = np.nan
+        else:
+            treasury_pct = trmend_qy / total_shares * 100
+
         results.append({
             "corp_code": corp_code,
             "year": year,
@@ -120,10 +151,22 @@ def main() -> None:
 
     # 2. 자사주 데이터 (선택)
     tres_path = DATA_RAW / "treasury_raw.csv"
+    shares_path = DATA_RAW / "total_shares_raw.csv"
     if tres_path.exists():
         logger.info("treasury_raw.csv 로드 중...")
         df_tres = pd.read_csv(tres_path, dtype=str)
-        df_treasury = process_treasury(df_tres)
+
+        df_shares = None
+        if shares_path.exists():
+            logger.info("total_shares_raw.csv 로드 중 (자사주 비율 계산용)...")
+            df_shares = pd.read_csv(shares_path, dtype=str)
+            logger.info(f"  {len(df_shares)}행 로드")
+        else:
+            logger.warning("total_shares_raw.csv 없음 → treasury_pct = NaN (03b 스크립트 실행 필요)")
+
+        df_treasury = process_treasury(df_tres, df_shares)
+        non_null = df_treasury["treasury_pct"].notna().sum()
+        logger.info(f"  자사주 비율 계산: {non_null}/{len(df_treasury)}건 성공")
         df_panel = df_panel.merge(df_treasury, on=["corp_code", "year"], how="left")
         logger.info(f"  자사주 데이터 병합 완료")
     else:

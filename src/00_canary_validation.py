@@ -27,6 +27,7 @@ REQUIRED_FIELDS = {
     "hyslrSttus": ["nm", "relate", "trmend_posesn_stock_co", "trmend_posesn_stock_qota_rt"],
     "tesstkAcqsDspsSttus": ["stock_knd", "bsis_qy", "trmend_qy"],
     "mrhlSttus": ["se", "shrholdr_co", "hold_stock_rate"],
+    "stockTotqySttus": ["se", "isu_stock_totqy"],
 }
 
 
@@ -200,6 +201,61 @@ def validate_minority() -> bool:
     return all_passed
 
 
+def validate_total_shares() -> bool:
+    """stockTotqySttus 카나리아 검증."""
+    logger.info("\n" + "=" * 60)
+    logger.info("Step 4: stockTotqySttus (주식의 총수 현황) 검증")
+    logger.info("=" * 60)
+
+    api_key = load_api_key()
+    all_passed = True
+
+    for corp_code, corp_name, market in CANARY_CORPS:
+        logger.info(f"\n[{corp_name}] stockTotqySttus 호출 ({corp_code}, {CANARY_YEAR})")
+
+        data = call_dart_api(
+            "stockTotqySttus",
+            api_key,
+            {
+                "corp_code": corp_code,
+                "bsns_year": CANARY_YEAR,
+                "reprt_code": "11011",
+            },
+        )
+
+        if not data or "list" not in data:
+            logger.error(f"  ❌ 응답 없음 또는 'list' 키 없음")
+            all_passed = False
+            continue
+
+        logger.info(f"  응답 행 수: {len(data['list'])}")
+        if data["list"]:
+            logger.info(f"  Raw response:\n{json.dumps(data['list'], ensure_ascii=False, indent=2)}")
+
+        # 필드 존재 확인
+        missing_fields = []
+        for item in data["list"]:
+            for field in REQUIRED_FIELDS["stockTotqySttus"]:
+                if field not in item and field not in missing_fields:
+                    missing_fields.append(field)
+
+        if missing_fields:
+            logger.error(f"  ❌ 필드 누락: {missing_fields}")
+            logger.error(f"     사용 가능한 모든 키: {sorted(data['list'][0].keys())}")
+            all_passed = False
+        else:
+            # "발행한 주식의 총수" 행 확인
+            issued_rows = [i for i in data["list"] if "발행한" in i.get("se", "")]
+            if issued_rows:
+                logger.info(f"  ✅ '발행한 주식의 총수' 행 확인: isu_stock_totqy = {issued_rows[0].get('isu_stock_totqy', '?')}")
+            else:
+                ses = [i.get("se", "") for i in data["list"]]
+                logger.warning(f"  ⚠️  '발행한 주식의 총수' 행 없음. se 값들: {ses}")
+            logger.info(f"  ✅ 필드 존재 확인 완료")
+
+    return all_passed
+
+
 def main() -> None:
     logger.info("\n" + "🔍 " * 30)
     logger.info("카나리아 검증 시작 — DART API 필드 확인")
@@ -208,6 +264,7 @@ def main() -> None:
     result_ownership = validate_ownership()
     result_treasury = validate_treasury()
     result_minority = validate_minority()
+    result_shares = validate_total_shares()
 
     logger.info("\n" + "=" * 60)
     logger.info("최종 결과")
@@ -215,8 +272,9 @@ def main() -> None:
     logger.info(f"hyslrSttus (최대주주): {'✅ PASS' if result_ownership else '❌ FAIL'}")
     logger.info(f"tesstkAcqsDspsSttus (자사주): {'✅ PASS' if result_treasury else '❌ FAIL'}")
     logger.info(f"mrhlSttus (소액주주): {'✅ PASS' if result_minority else '❌ FAIL'}")
+    logger.info(f"stockTotqySttus (총발행주식수): {'✅ PASS' if result_shares else '❌ FAIL'}")
 
-    if result_ownership and result_treasury and result_minority:
+    if result_ownership and result_treasury and result_minority and result_shares:
         logger.info("\n✅ 모든 검증 통과! 전체 수집으로 진행 가능합니다.")
         sys.exit(0)
     else:

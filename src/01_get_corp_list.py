@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 # company.json 호출 체크포인트 (corp_code → corp_cls 매핑)
 CLS_CHECKPOINT_PATH = DATA_RAW / "corp_cls_checkpoint.json"
+# company.json 추가 필드 체크포인트 (corp_code → {est_dt, induty_code})
+CORP_INFO_CHECKPOINT_PATH = DATA_RAW / "corp_info_checkpoint.json"
 
 
 def download_corp_codes(api_key: str) -> list[dict[str, str]]:
@@ -80,18 +82,33 @@ def save_cls_checkpoint(mapping: dict[str, str]) -> None:
     )
 
 
+def load_corp_info_checkpoint() -> dict[str, dict[str, str]]:
+    """corp_code → {est_dt, induty_code} 체크포인트 로드."""
+    if CORP_INFO_CHECKPOINT_PATH.exists():
+        return json.loads(CORP_INFO_CHECKPOINT_PATH.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_corp_info_checkpoint(mapping: dict[str, dict[str, str]]) -> None:
+    CORP_INFO_CHECKPOINT_PATH.write_text(
+        json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def fetch_corp_cls(
     corps: list[dict[str, str]],
     api_key: str,
-) -> dict[str, str]:
-    """company.json API로 각 기업의 corp_cls를 확인. 체크포인트 지원."""
-    mapping = load_cls_checkpoint()
-    remaining = [c for c in corps if c["corp_code"] not in mapping]
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """company.json API로 corp_cls·est_dt·induty_code 확인. 체크포인트 지원."""
+    cls_map = load_cls_checkpoint()
+    info_map = load_corp_info_checkpoint()
+    # 둘 다 완료된 것만 건너뜀
+    remaining = [c for c in corps if c["corp_code"] not in cls_map]
 
     counter = load_daily_counter()
     logger.info(
         f"corp_cls 조회 대상: {len(remaining)}개 "
-        f"(이미 완료: {len(mapping)}개) | "
+        f"(이미 완료: {len(cls_map)}개) | "
         f"오늘 API 호출: {counter['calls']}/{10_000}"
     )
 
@@ -106,20 +123,26 @@ def fetch_corp_cls(
 
             data = call_dart_api("company", api_key, {"corp_code": corp["corp_code"]})
             counter["calls"] += 1
-            mapping[corp["corp_code"]] = data.get("corp_cls", "") if data else ""
+            cls_map[corp["corp_code"]] = data.get("corp_cls", "") if data else ""
+            info_map[corp["corp_code"]] = {
+                "est_dt": data.get("est_dt", "") if data else "",
+                "induty_code": data.get("induty_code", "") if data else "",
+            }
 
             if (i + 1) % 100 == 0:
-                save_cls_checkpoint(mapping)
+                save_cls_checkpoint(cls_map)
+                save_corp_info_checkpoint(info_map)
                 save_daily_counter(counter)
                 logger.info(f"  corp_cls 조회 {i + 1}/{len(remaining)} | 오늘 호출: {counter['calls']}")
 
             time.sleep(SLEEP_SEC)
 
     finally:
-        save_cls_checkpoint(mapping)
+        save_cls_checkpoint(cls_map)
+        save_corp_info_checkpoint(info_map)
         save_daily_counter(counter)
 
-    return mapping
+    return cls_map, info_map
 
 
 def main() -> None:
@@ -133,8 +156,8 @@ def main() -> None:
     # Phase 1: corpCode.xml 다운로드
     corps = download_corp_codes(api_key)
 
-    # Phase 2: company.json으로 corp_cls 확인 (체크포인트 지원)
-    cls_map = fetch_corp_cls(corps, api_key)
+    # Phase 2: company.json으로 corp_cls·est_dt·induty_code 확인 (체크포인트 지원)
+    cls_map, info_map = fetch_corp_cls(corps, api_key)
 
     # Phase 3: KOSPI/KOSDAQ만 필터 후 저장
     market_map = {"Y": "KOSPI", "K": "KOSDAQ"}
@@ -144,7 +167,13 @@ def main() -> None:
         market = market_map.get(corp_cls)
         if market is None:
             continue
-        rows.append({**corp, "market": market})
+        info = info_map.get(corp["corp_code"], {})
+        rows.append({
+            **corp,
+            "market": market,
+            "est_dt": info.get("est_dt", ""),
+            "induty_code": info.get("induty_code", ""),
+        })
 
     df = pd.DataFrame(rows)
 
@@ -163,7 +192,13 @@ def main() -> None:
                 continue  # 아직 조회 안 됨
             market = market_map.get(corp_cls)
             if market:
-                rows_partial.append({**corp, "market": market})
+                info = info_map.get(corp["corp_code"], {})
+                rows_partial.append({
+                    **corp,
+                    "market": market,
+                    "est_dt": info.get("est_dt", ""),
+                    "induty_code": info.get("induty_code", ""),
+                })
         if rows_partial:
             df = pd.DataFrame(rows_partial)
 
