@@ -3,15 +3,21 @@ name: "Step 2 — 최대주주 데이터 수집"
 on:
   workflow_dispatch:
   schedule:
-    # 매일 UTC 00:30 (한국 09:30) 자동 실행 — listed_corps.csv 완성 후 활성화
+    # 매일 UTC 00:30 (한국 09:30) 자동 실행
     - cron: "30 0 * * *"
+
+# 동일 스텝이 동시에 두 번 실행되지 않도록 방지
+# cancel-in-progress: false — 실행 중인 수집을 중단하지 않음
+concurrency:
+  group: step2-ownership
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
+      actions: write   # gh workflow run 으로 다음 스텝 트리거용
 
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +32,7 @@ jobs:
       - name: Create .env
         run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env
 
-      - name: Download listed_corps.csv (Step 1 artifact)
+      - name: Download Step 1 artifact (listed_corps.csv)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -40,8 +46,7 @@ jobs:
           fi
           gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
           unzip -o /tmp/step1.zip -d data/raw/
-          CORP_CNT=$(tail -n +2 data/raw/listed_corps.csv | wc -l | tr -d ' ')
-          echo "상장사 ${CORP_CNT}개 로드 완료"
+          echo "상장사 $(tail -n +2 data/raw/listed_corps.csv | wc -l | tr -d ' ')개 로드"
 
       - name: Restore previous ownership data (체크포인트 + CSV)
         env:
@@ -60,7 +65,42 @@ jobs:
             echo "이전 데이터 없음 — 처음부터 시작"
           fi
 
-      - name: Run Step 2
+      # ── Step 2 이미 완료됐는지 확인 (완료 시 스크립트 스킵, 바로 Step 3 트리거) ──
+      - name: Check if Step 2 already complete
+        id: pre_check
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          cp_path = Path("data/raw/ownership_checkpoint.json")
+          corps_path = Path("data/raw/listed_corps.csv")
+
+          if not cp_path.exists():
+              print("체크포인트 없음 — 처음부터 수집")
+              Path("/tmp/step2_already_done").write_text("false")
+              exit()
+
+          cp = json.loads(cp_path.read_text())
+          done = sum(len(v) for v in cp.get("completed", {}).values())
+          total_corps = sum(1 for _ in open(corps_path)) - 1
+          total = total_corps * 11  # 2015~2025
+
+          pct = done / total * 100 if total else 0
+          print(f"현재 진행: {done:,}/{total:,} ({pct:.1f}%)")
+
+          if done >= total:
+              print("✅ Step 2 이미 완료 — 스크립트 스킵 후 Step 3 트리거")
+              Path("/tmp/step2_already_done").write_text("true")
+          else:
+              print(f"⏳ 잔여 {total - done:,}건 — 수집 시작")
+              Path("/tmp/step2_already_done").write_text("false")
+          PYEOF
+
+          echo "already_done=$(cat /tmp/step2_already_done)" >> $GITHUB_OUTPUT
+
+      - name: Run Step 2 (미완료 시에만)
+        if: steps.pre_check.outputs.already_done == 'false'
         run: python src/02_collect_ownership.py
 
       - name: Upload artifact
@@ -74,6 +114,34 @@ jobs:
             data/raw/.api_daily_counter.json
           retention-days: 90
           overwrite: true
+
+      # ── Step 2 완료 여부 재확인 후 Step 3 자동 트리거 ────────────────────
+      - name: Auto-trigger Step 3 if complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          cp = json.loads(Path("data/raw/ownership_checkpoint.json").read_text())
+          done = sum(len(v) for v in cp.get("completed", {}).values())
+          total_corps = sum(1 for _ in open("data/raw/listed_corps.csv")) - 1
+          total = total_corps * 11
+
+          if done >= total:
+              Path("/tmp/trigger_step3").write_text("true")
+              print(f"✅ Step 2 완료 ({done:,}/{total:,}) → Step 3 트리거 예정")
+          else:
+              Path("/tmp/trigger_step3").write_text("false")
+              print(f"⏳ Step 2 미완료 ({done:,}/{total:,}) — 내일 계속")
+          PYEOF
+
+          if [ "$(cat /tmp/trigger_step3)" = "true" ]; then
+            echo "Step 3 워크플로우 트리거 중..."
+            gh workflow run step3-treasury.yml --ref "${{ github.ref_name }}"
+            echo "✅ Step 3 트리거 완료"
+          fi
 
       - name: Summary
         if: always()

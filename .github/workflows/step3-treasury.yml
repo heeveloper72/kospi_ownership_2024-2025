@@ -1,17 +1,19 @@
-name: "Step 3 — 자사주 데이터 수집"
+name: "Step 3 — 자사주 + 총발행주식수 수집"
 
 on:
   workflow_dispatch:
-  schedule:
-    # 매일 UTC 01:00 (한국 10:00) — Step 2 미완료 시 자동 스킵됨
-    - cron: "0 1 * * *"
+  # schedule 제거 — Step 2 완료 시 자동 트리거되므로 별도 스케줄 불필요
+
+concurrency:
+  group: step3-treasury
+  cancel-in-progress: false
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
+      actions: write   # Step 4 트리거용
 
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +28,7 @@ jobs:
       - name: Create .env
         run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env
 
-      - name: Download listed_corps.csv (Step 1 artifact)
+      - name: Download Step 1 artifact (listed_corps.csv)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -41,9 +43,8 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
           unzip -o /tmp/step1.zip -d data/raw/
 
-      # ── Step 2 완료 여부 확인 ────────────────────────────────────────────
-      - name: Check Step 2 completion
-        id: check_step2
+      # ── Step 2 완료 여부 확인 (WARNING만 — 수동 트리거 허용) ─────────────
+      - name: Check Step 2 completion (warning only)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -52,13 +53,12 @@ jobs:
             --jq '.artifacts[0].id // empty')
 
           if [ -z "$ARTIFACT_ID" ]; then
-            echo "Step 2 artifact 없음 → 스킵"
-            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "::warning::Step 2 아티팩트 없음. 수동 실행으로 간주하고 계속합니다."
             exit 0
           fi
 
-          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step2_check.zip
           mkdir -p /tmp/step2_check
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step2_check.zip
           unzip -o /tmp/step2_check.zip -d /tmp/step2_check/
 
           python - <<'PYEOF'
@@ -69,49 +69,41 @@ jobs:
           corps_path = Path("data/raw/listed_corps.csv")
 
           if not cp_path.exists():
-              print("체크포인트 없음 → 스킵")
-              Path("/tmp/step2_done").write_text("false")
+              print("::warning::Step 2 체크포인트 없음.")
               sys.exit(0)
 
           cp = json.loads(cp_path.read_text())
           done = sum(len(v) for v in cp.get("completed", {}).values())
-          total_corps = sum(1 for _ in open(corps_path)) - 1
-          total = total_corps * 11  # 2015~2025
+          total = (sum(1 for _ in open(corps_path)) - 1) * 11
 
-          pct = done / total * 100 if total else 0
-          print(f"Step 2 진행: {done:,}/{total:,} ({pct:.1f}%)")
-
-          if done >= total:
-              print("Step 2 완료 ✓ → Step 3 진행")
-              Path("/tmp/step2_done").write_text("true")
+          if done < total:
+              pct = done / total * 100 if total else 0
+              print(f"::warning::Step 2 미완료 ({done:,}/{total:,}, {pct:.1f}%). 수동 실행으로 계속합니다.")
           else:
-              remaining = total - done
-              print(f"Step 2 미완료 (잔여 {remaining:,}건) → Step 3 스킵")
-              Path("/tmp/step2_done").write_text("false")
+              print(f"✅ Step 2 완료 확인 ({done:,}/{total:,})")
           PYEOF
 
-          STEP2_DONE=$(cat /tmp/step2_done)
-          echo "skip=$([ "$STEP2_DONE" = "true" ] && echo false || echo true)" >> $GITHUB_OUTPUT
-          echo "Step 2 done=$STEP2_DONE"
-
-      - name: Skip notice
-        if: steps.check_step2.outputs.skip == 'true'
+      # ── 공유 일일 카운터 복원 (날짜 일치 확인 필수) ──────────────────────
+      - name: Restore shared daily counter from Step 2
         run: |
-          echo "⏭️  Step 2가 아직 완료되지 않았습니다. Step 3를 스킵합니다." | tee -a $GITHUB_STEP_SUMMARY
-          echo "Step 2가 모두 완료된 후 Step 3가 자동 시작됩니다." >> $GITHUB_STEP_SUMMARY
+          COUNTER_FILE="/tmp/step2_check/.api_daily_counter.json"
+          if [ ! -f "$COUNTER_FILE" ]; then
+            echo "Step 2 카운터 없음 — 새 카운터로 시작"
+            exit 0
+          fi
 
-      # ── 이후 스텝은 Step 2 완료 시에만 실행 ────────────────────────────
+          COUNTER_DATE=$(python -c "import json; print(json.load(open('$COUNTER_FILE'))['date'])")
+          TODAY=$(date -u +%Y-%m-%d)
 
-      - name: Restore shared daily counter
-        if: steps.check_step2.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Step 2 artifact에서 오늘 사용한 카운터 복원
-          cp /tmp/step2_check/.api_daily_counter.json data/raw/ 2>/dev/null || true
+          if [ "$COUNTER_DATE" = "$TODAY" ]; then
+            cp "$COUNTER_FILE" data/raw/.api_daily_counter.json
+            CALLS=$(python -c "import json; print(json.load(open('data/raw/.api_daily_counter.json'))['calls'])")
+            echo "✅ 카운터 복원 완료: 오늘 이미 ${CALLS}/10,000 사용"
+          else
+            echo "⚠️  카운터 날짜 불일치 (저장: $COUNTER_DATE, 오늘: $TODAY) — 새 카운터 사용"
+          fi
 
       - name: Restore previous treasury + total_shares data
-        if: steps.check_step2.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -126,16 +118,50 @@ jobs:
             echo "첫 실행"
           fi
 
-      - name: Run Step 3 — 자사주 수량 수집
-        if: steps.check_step2.outputs.skip == 'false'
+      # ── Step 3 이미 완료됐는지 확인 (03 + 03b 둘 다) ────────────────────
+      - name: Check if Step 3 already complete
+        id: pre_check
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          corps_path = Path("data/raw/listed_corps.csv")
+          total = (sum(1 for _ in open(corps_path)) - 1) * 11
+
+          def check_cp(path):
+              if not Path(path).exists():
+                  return 0
+              cp = json.loads(Path(path).read_text())
+              return sum(len(v) for v in cp.get("completed", {}).values())
+
+          done_t = check_cp("data/raw/treasury_checkpoint.json")
+          done_s = check_cp("data/raw/total_shares_checkpoint.json")
+
+          print(f"자사주(03):       {done_t:,}/{total:,}")
+          print(f"총발행주식수(03b): {done_s:,}/{total:,}")
+
+          both_done = (done_t >= total) and (done_s >= total)
+          Path("/tmp/step3_already_done").write_text("true" if both_done else "false")
+
+          if both_done:
+              print("✅ Step 3 (03 + 03b) 이미 완료 — 스크립트 스킵")
+          else:
+              print(f"⏳ 잔여: 자사주 {total - done_t:,}건, 총발행주식수 {total - done_s:,}건")
+          PYEOF
+
+          echo "already_done=$(cat /tmp/step3_already_done)" >> $GITHUB_OUTPUT
+
+      - name: Run Step 3 — 자사주 수량 수집 (미완료 시에만)
+        if: steps.pre_check.outputs.already_done == 'false'
         run: python src/03_collect_treasury.py
 
-      - name: Run Step 3b — 총발행주식수 수집
-        if: steps.check_step2.outputs.skip == 'false'
+      - name: Run Step 3b — 총발행주식수 수집 (미완료 시에만)
+        if: steps.pre_check.outputs.already_done == 'false'
         run: python src/03b_collect_total_shares.py
 
       - name: Upload artifact
-        if: steps.check_step2.outputs.skip == 'false' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: step3-treasury-data
@@ -148,22 +174,55 @@ jobs:
           retention-days: 90
           overwrite: true
 
+      # ── 03 + 03b 둘 다 완료 시에만 Step 4 트리거 ────────────────────────
+      - name: Auto-trigger Step 4 if complete (03 AND 03b)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          corps_path = Path("data/raw/listed_corps.csv")
+          total = (sum(1 for _ in open(corps_path)) - 1) * 11
+
+          def check_cp(path):
+              if not Path(path).exists():
+                  return 0
+              cp = json.loads(Path(path).read_text())
+              return sum(len(v) for v in cp.get("completed", {}).values())
+
+          done_t = check_cp("data/raw/treasury_checkpoint.json")
+          done_s = check_cp("data/raw/total_shares_checkpoint.json")
+
+          both_done = (done_t >= total) and (done_s >= total)
+          Path("/tmp/trigger_step4").write_text("true" if both_done else "false")
+
+          if both_done:
+              print(f"✅ Step 3 완료 (03: {done_t:,}, 03b: {done_s:,}) → Step 4 트리거 예정")
+          else:
+              print(f"⏳ 미완료 — 03: {done_t:,}/{total:,}, 03b: {done_s:,}/{total:,}")
+          PYEOF
+
+          if [ "$(cat /tmp/trigger_step4)" = "true" ]; then
+            echo "Step 4 워크플로우 트리거 중..."
+            gh workflow run step4-minority.yml --ref "${{ github.ref_name }}"
+            echo "✅ Step 4 트리거 완료"
+          fi
+
       - name: Summary
-        if: steps.check_step2.outputs.skip == 'false' && always()
+        if: always()
         run: |
           python - <<'EOF'
           import json, os
           summary = []
-          try:
-              cp = json.load(open("data/raw/treasury_checkpoint.json"))
-              done = sum(len(v) for v in cp.get("completed", {}).values())
-              summary.append(f"자사주 완료: **{done:,}건**")
-          except: pass
-          try:
-              cp = json.load(open("data/raw/total_shares_checkpoint.json"))
-              done = sum(len(v) for v in cp.get("completed", {}).values())
-              summary.append(f"총발행주식수 완료: **{done:,}건**")
-          except: pass
+          for label, cp_file in [("자사주(03)", "data/raw/treasury_checkpoint.json"),
+                                  ("총발행주식수(03b)", "data/raw/total_shares_checkpoint.json")]:
+              try:
+                  cp = json.load(open(cp_file))
+                  done = sum(len(v) for v in cp.get("completed", {}).values())
+                  summary.append(f"{label} 완료: **{done:,}건**")
+              except: pass
           try:
               ct = json.load(open("data/raw/.api_daily_counter.json"))
               summary.append(f"오늘 API 호출: **{ct['calls']:,}/10,000**")
