@@ -33,7 +33,7 @@ YEARS = list(range(2015, 2026))
 FIELDNAMES = [
     "corp_code", "corp_name", "market", "year",
     "stock_knd", "acqs_mth1", "acqs_mth2", "acqs_mth3",
-    "bsis_qy", "change_qy", "trmend_qy", "trmend_rate",
+    "bsis_qy", "change_qy", "trmend_qy",
 ]
 
 
@@ -94,7 +94,6 @@ def collect_treasury() -> None:
                         "bsis_qy": item.get("bsis_qy", ""),
                         "change_qy": item.get("change_qy", ""),
                         "trmend_qy": item.get("trmend_qy", ""),
-                        "trmend_rate": item.get("trmend_rate", ""),
                     }
                     for item in data["list"]
                 ]

@@ -88,8 +88,8 @@ def collect_ownership() -> None:
                         "year": year,
                         "nm": item.get("nm", ""),
                         "relate": item.get("relate", ""),
-                        "stock_cnt": item.get("stock_cnt", ""),
-                        "stock_rate": item.get("stock_rate", ""),
+                        "stock_cnt": item.get("trmend_posesn_stock_co", ""),
+                        "stock_rate": item.get("trmend_posesn_stock_qota_rt", ""),
                     }
                     for item in data["list"]
                 ]
