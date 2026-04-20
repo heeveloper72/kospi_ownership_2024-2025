@@ -302,10 +302,7 @@ jobs:
             echo "변경사항 없음"
             exit 0
           fi
-          git commit -m "diag: 수집 데이터 진단 보고서 자동 생성
-
-workflow: diagnose-data.yml
-run: ${{ github.run_id }}"
+          git commit -m "diag: 수집 데이터 진단 보고서 자동 생성 (run ${{ github.run_id }})"
           # 병렬 실행 시 충돌 방지 위해 rebase
           git pull --rebase origin ${{ github.ref_name }} || true
           git push origin HEAD:${{ github.ref_name }}
