@@ -334,8 +334,15 @@ jobs:
                   w(f"| {name} | {col} | {len(sub):,} | {v:.2f}% | {bm}% | {diff:+.2f} |")
               rep("전체", None, "largest_pct", BENCH["total"]["largest"])
               rep("전체", None, "friendly_pct", BENCH["total"]["friendly"])
+              rep("전체", None, "voting_friendly_pct", BENCH["total"]["friendly"])
               rep("KOSPI", df23["market"] == "KOSPI", "friendly_pct", BENCH["KOSPI"]["friendly"])
+              rep("KOSPI", df23["market"] == "KOSPI", "voting_friendly_pct", BENCH["KOSPI"]["friendly"])
               rep("KOSDAQ", df23["market"] == "KOSDAQ", "friendly_pct", BENCH["KOSDAQ"]["friendly"])
+              rep("KOSDAQ", df23["market"] == "KOSDAQ", "voting_friendly_pct", BENCH["KOSDAQ"]["friendly"])
+              # treasury 평균 (2023)
+              t_mean = df23["treasury_pct"].dropna().mean()
+              w()
+              w(f"- 2023년 treasury_pct 평균: **{t_mean:.2f}%** (우호지분-투표우호지분 차이 설명)")
 
               # ─── 8-b. SPAC/REIT 제외 시 ───
               w()
@@ -358,8 +365,11 @@ jobs:
                   w(f"| {name} | {col} | {len(sub):,} | {v:.2f}% | {bm}% | {diff:+.2f} |")
               rep2("전체", None, "largest_pct", BENCH["total"]["largest"])
               rep2("전체", None, "friendly_pct", BENCH["total"]["friendly"])
+              rep2("전체", None, "voting_friendly_pct", BENCH["total"]["friendly"])
               rep2("KOSPI", df23_f["market"] == "KOSPI", "friendly_pct", BENCH["KOSPI"]["friendly"])
+              rep2("KOSPI", df23_f["market"] == "KOSPI", "voting_friendly_pct", BENCH["KOSPI"]["friendly"])
               rep2("KOSDAQ", df23_f["market"] == "KOSDAQ", "friendly_pct", BENCH["KOSDAQ"]["friendly"])
+              rep2("KOSDAQ", df23_f["market"] == "KOSDAQ", "voting_friendly_pct", BENCH["KOSDAQ"]["friendly"])
           else:
               w("⚠️ `ownership_panel.csv` 없음 (Step 5 실패).")
 
