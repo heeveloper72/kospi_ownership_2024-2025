@@ -129,59 +129,58 @@ def process_treasury(
 ) -> pd.DataFrame:
     """treasury_raw.csv에서 자사주 비율 계산. 보통주(普通株)만 집계.
 
-    비율 = trmend_qy(기말 자사주 수량) / 총발행주식수 * 100
-    df_shares: total_shares_raw.csv 로드 결과 (없으면 NaN)
+    1순위: DART가 직접 계산해 준 trmend_rate (공시 원문 비율) — 가장 신뢰성 높음.
+    2순위: trmend_qy / total_shares × 100 — trmend_rate 없을 때만 사용.
+           total_shares는 total_shares_raw.csv의 '합계' 행 기준.
     """
-    # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
-    # "보통주" 대신 "보통"으로 검색 (보통주식, 기명식보통주, ' 보통주 ' 등 수용)
     df_tres = df_tres.copy()
     df_tres["stock_knd_clean"] = df_tres["stock_knd"].fillna("").astype(str).str.strip()
     logger.info(f"  자사주 stock_knd 고유값 상위: {df_tres['stock_knd_clean'].value_counts().head(10).to_dict()}")
     df_tres = df_tres[df_tres["stock_knd_clean"].str.contains("보통", na=False)].copy()
     logger.info(f"  보통주 필터 후: {len(df_tres):,}행")
+
+    # DART 직접 계산 비율 파싱 (1순위)
+    df_tres["trmend_rate_f"] = df_tres["trmend_rate"].apply(parse_rate) if "trmend_rate" in df_tres.columns else np.nan
     df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(_parse_count)
 
-    # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares (보통주 기준)
-    # DART stockTotqySttus 응답의 se 컬럼은 "합계"/"보통주"/"보통주식"/"우선주"/"비고" 등.
-    # treasury_raw를 보통주로 필터하므로 분모도 보통주 기준으로 맞춘다.
-    # 보통주 행이 없는 기업-연도는 "합계"로 폴백 (단일 주식종류 기업).
+    # total_shares 딕셔너리: '합계' 행 우선, 보통주 행 폴백 (2순위 계산용)
     shares_dict: dict[tuple[str, str], float] = {}
     if df_shares is not None and not df_shares.empty:
         se_clean = df_shares["se"].fillna("").astype(str).str.strip()
-
-        # 1순위: "보통" 포함 (보통주, 보통주식, 기명식보통주 등)
-        mask_common = se_clean.str.contains("보통", na=False)
-        df_common = df_shares[mask_common].copy()
-        logger.info(f"  총발행주식수: '보통' 포함 행 {len(df_common):,}건")
-        for _, row in df_common.iterrows():
+        # '합계' 행 = 전체 주식종류 합산 → 분모로 가장 안전
+        for _, row in df_shares[se_clean == "합계"].iterrows():
             key = (str(row["corp_code"]), str(row["year"]))
             val = _pick_total_shares(row)
             if not np.isnan(val) and val > 0 and key not in shares_dict:
                 shares_dict[key] = val
-
-        # 2순위: "합계" 행 — 보통주 행이 없는 기업-연도에만 적용 (단일 주식종류)
-        mask_sum = se_clean == "합계"
-        df_sum = df_shares[mask_sum].copy()
-        fallback_used = 0
-        for _, row in df_sum.iterrows():
+        # '보통주' 행 폴백 (합계 없는 기업)
+        for _, row in df_shares[se_clean.str.contains("보통", na=False)].iterrows():
             key = (str(row["corp_code"]), str(row["year"]))
-            if key in shares_dict:
-                continue
-            val = _pick_total_shares(row)
-            if not np.isnan(val) and val > 0:
-                shares_dict[key] = val
-                fallback_used += 1
-        logger.info(f"  총발행주식수: '합계' 폴백 {fallback_used:,}건, 총 shares_dict {len(shares_dict):,}건")
+            if key not in shares_dict:
+                val = _pick_total_shares(row)
+                if not np.isnan(val) and val > 0:
+                    shares_dict[key] = val
+        logger.info(f"  총발행주식수 shares_dict: {len(shares_dict):,}건 구축")
 
     results = []
+    rate_used, calc_used, nan_used = 0, 0, 0
     for (corp_code, year), grp in df_tres.groupby(["corp_code", "year"]):
-        trmend_qy = grp["trmend_qy_f"].sum()
-        total_shares = shares_dict.get((str(corp_code), str(year)), np.nan)
-
-        if np.isnan(total_shares) or total_shares <= 0:
-            treasury_pct = np.nan
+        # 1순위: DART trmend_rate (이미 퍼센트 단위)
+        valid_rate = grp["trmend_rate_f"].dropna()
+        valid_rate = valid_rate[valid_rate >= 0]
+        if not valid_rate.empty:
+            treasury_pct = valid_rate.iloc[0]
+            rate_used += 1
         else:
-            treasury_pct = trmend_qy / total_shares * 100
+            # 2순위: 수량 / 총발행주식수
+            trmend_qy = grp["trmend_qy_f"].sum()
+            total_shares = shares_dict.get((str(corp_code), str(year)), np.nan)
+            if not np.isnan(total_shares) and total_shares > 0 and not np.isnan(trmend_qy):
+                treasury_pct = trmend_qy / total_shares * 100
+                calc_used += 1
+            else:
+                treasury_pct = np.nan
+                nan_used += 1
 
         results.append({
             "corp_code": corp_code,
@@ -189,6 +188,7 @@ def process_treasury(
             "treasury_pct": treasury_pct,
         })
 
+    logger.info(f"  자사주 비율: trmend_rate 사용 {rate_used:,}건 | 수량계산 {calc_used:,}건 | NaN {nan_used:,}건")
     return pd.DataFrame(results)
 
 
