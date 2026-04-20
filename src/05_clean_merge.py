@@ -163,11 +163,11 @@ def process_treasury(
         logger.info(f"  총발행주식수 shares_dict: {len(shares_dict):,}건 구축")
 
     results = []
-    rate_used, calc_used, nan_used = 0, 0, 0
+    rate_used, calc_used, nan_used, capped = 0, 0, 0, 0
     for (corp_code, year), grp in df_tres.groupby(["corp_code", "year"]):
-        # 1순위: DART trmend_rate (이미 퍼센트 단위)
+        # 1순위: DART trmend_rate (이미 퍼센트 단위, 0~100 범위만 수용)
         valid_rate = grp["trmend_rate_f"].dropna()
-        valid_rate = valid_rate[valid_rate >= 0]
+        valid_rate = valid_rate[(valid_rate >= 0) & (valid_rate <= 100)]
         if not valid_rate.empty:
             treasury_pct = valid_rate.iloc[0]
             rate_used += 1
@@ -176,8 +176,14 @@ def process_treasury(
             trmend_qy = grp["trmend_qy_f"].sum()
             total_shares = shares_dict.get((str(corp_code), str(year)), np.nan)
             if not np.isnan(total_shares) and total_shares > 0 and not np.isnan(trmend_qy):
-                treasury_pct = trmend_qy / total_shares * 100
-                calc_used += 1
+                raw_pct = trmend_qy / total_shares * 100
+                # 100% 초과 = 보고 단위 불일치 등 데이터 오류 → NaN 처리
+                if raw_pct > 100:
+                    treasury_pct = np.nan
+                    capped += 1
+                else:
+                    treasury_pct = raw_pct
+                    calc_used += 1
             else:
                 treasury_pct = np.nan
                 nan_used += 1
@@ -188,7 +194,10 @@ def process_treasury(
             "treasury_pct": treasury_pct,
         })
 
-    logger.info(f"  자사주 비율: trmend_rate 사용 {rate_used:,}건 | 수량계산 {calc_used:,}건 | NaN {nan_used:,}건")
+    logger.info(
+        f"  자사주 비율: trmend_rate {rate_used:,}건 | 수량계산 {calc_used:,}건 | "
+        f"단위오류(>100%) {capped:,}건 | NaN {nan_used:,}건"
+    )
     return pd.DataFrame(results)
 
 

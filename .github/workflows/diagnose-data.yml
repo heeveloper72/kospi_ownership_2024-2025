@@ -193,18 +193,34 @@ jobs:
               w(f"- '보통주' 포함: **{mask_comm_strict.sum():,}/{len(dft):,}** ({mask_comm_strict.mean()*100:.1f}%)")
 
               w()
-              w("### 4-3. trmend_qy 비어있지않은 행 비율")
+              w("### 4-3. trmend_qy / trmend_rate 비어있지않은 행 비율")
               w()
-              if "trmend_qy" in dft.columns:
-                  not_empty = dft["trmend_qy"].fillna("").astype(str).str.strip().replace("-", "").astype(bool).sum()
-                  w(f"- 비어있지않음: **{not_empty:,}/{len(dft):,}** ({not_empty/len(dft)*100:.1f}%)")
+              for col in ["trmend_qy", "trmend_rate"]:
+                  if col in dft.columns:
+                      not_empty = dft[col].fillna("").astype(str).str.strip().replace("-", "").astype(bool).sum()
+                      w(f"- `{col}` 비어있지않음: **{not_empty:,}/{len(dft):,}** ({not_empty/len(dft)*100:.1f}%)")
+                  else:
+                      w(f"- `{col}`: **컬럼 없음** ← trmend_rate 미수집 확인됨")
 
               w()
-              w("### 4-4. 샘플 5행")
+              w("### 4-4. trmend_rate 원본값 샘플 (있으면)")
               w()
-              w("```")
-              w(dft.head(5).to_string(index=False, max_colwidth=20))
-              w("```")
+              if "trmend_rate" in dft.columns:
+                  sample = dft[dft["trmend_rate"].fillna("").astype(str).str.strip().replace("-","") != ""].head(10)
+                  w("```")
+                  w(sample[["corp_code","corp_name","year","stock_knd","trmend_qy","trmend_rate"]].to_string(index=False))
+                  w("```")
+
+              w()
+              w("### 4-5. treasury_pct 극단값 상위 10 (Step 5 재실행 이후)")
+              w()
+              panel_tmp = Path("data/processed/ownership_panel.csv")
+              if panel_tmp.exists():
+                  dfp_tmp = pd.read_csv(panel_tmp)
+                  top10 = dfp_tmp.nlargest(10, "treasury_pct")[["corp_code","corp_name","year","treasury_pct"]]
+                  w("```")
+                  w(top10.to_string(index=False))
+                  w("```")
           else:
               w("❌ `treasury_raw.csv` 파일 없음.")
 
