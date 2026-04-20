@@ -1,0 +1,311 @@
+name: "Diagnose — 수집 데이터 진단 (treasury_pct=0 원인 규명)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # diagnostics 디렉토리로 커밋
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Download all data artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/raw data/processed diagnostics
+
+          download_artifact() {
+            local NAME=$1
+            local ARTIFACT_ID
+            ARTIFACT_ID=$(gh api \
+              "repos/${{ github.repository }}/actions/artifacts?name=${NAME}&per_page=1" \
+              --jq '.artifacts[0].id // empty')
+            if [ -n "$ARTIFACT_ID" ]; then
+              echo "${NAME} 다운로드 중..."
+              gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/${NAME}.zip
+              unzip -o /tmp/${NAME}.zip -d data/raw/
+            else
+              echo "::warning::${NAME} 아티팩트 없음"
+            fi
+          }
+
+          download_artifact step1-corp-list
+          download_artifact step2-ownership-data
+          download_artifact step3-treasury-data
+          download_artifact step4-minority-data
+          download_artifact step5-panel-data || true
+
+      - name: Run diagnostics
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          OUT = Path("diagnostics/DIAGNOSIS.md")
+          OUT.parent.mkdir(exist_ok=True)
+          lines = ["# 데이터 수집 진단 보고서", ""]
+          def w(s=""): lines.append(s)
+
+          RAW = Path("data/raw")
+          PROC = Path("data/processed")
+
+          w(f"생성 시각: {pd.Timestamp.now(tz='UTC').isoformat()}")
+          w()
+          w("## 1. 파일 존재 여부")
+          w()
+          w("| 파일 | 존재 | 크기(B) | 행수 |")
+          w("|------|------|---------|------|")
+          for rel in [
+              "listed_corps.csv",
+              "ownership_raw.csv",
+              "ownership_checkpoint.json",
+              "treasury_raw.csv",
+              "treasury_checkpoint.json",
+              "total_shares_raw.csv",
+              "total_shares_checkpoint.json",
+              "minority_raw.csv",
+              "minority_checkpoint.json",
+          ]:
+              p = RAW / rel
+              if p.exists():
+                  size = p.stat().st_size
+                  if rel.endswith(".csv"):
+                      try:
+                          n = sum(1 for _ in open(p, encoding="utf-8-sig")) - 1
+                      except Exception:
+                          n = "?"
+                  else:
+                      n = "-"
+                  w(f"| `{rel}` | ✅ | {size:,} | {n:,} | " if isinstance(n, int) else f"| `{rel}` | ✅ | {size:,} | {n} |")
+              else:
+                  w(f"| `{rel}` | ❌ | - | - |")
+
+          # 체크포인트 진행도
+          w()
+          w("## 2. 체크포인트 완료 현황")
+          w()
+          corps_n = sum(1 for _ in open(RAW / "listed_corps.csv", encoding="utf-8-sig")) - 1 if (RAW / "listed_corps.csv").exists() else 0
+          total_tasks = corps_n * 11
+          w(f"전체 기업 × 연도 = {corps_n:,} × 11 = **{total_tasks:,}건**")
+          w()
+          w("| 체크포인트 | 완료건수 | 진행률 |")
+          w("|------------|---------|--------|")
+          for name in ["ownership_checkpoint.json", "treasury_checkpoint.json", "total_shares_checkpoint.json", "minority_checkpoint.json"]:
+              p = RAW / name
+              if p.exists():
+                  cp = json.load(open(p))
+                  done = sum(len(v) for v in cp.get("completed", {}).values())
+                  pct = done / total_tasks * 100 if total_tasks else 0
+                  w(f"| `{name}` | {done:,} | {pct:.1f}% |")
+              else:
+                  w(f"| `{name}` | 파일없음 | - |")
+
+          # total_shares_raw 심층 진단 (CRITICAL)
+          w()
+          w("## 3. total_shares_raw.csv 심층 진단 (treasury_pct=0 원인)")
+          w()
+          ts_path = RAW / "total_shares_raw.csv"
+          if ts_path.exists():
+              dfs = pd.read_csv(ts_path, dtype=str)
+              w(f"- 전체 행수: **{len(dfs):,}**")
+              w(f"- 컬럼: `{list(dfs.columns)}`")
+              w()
+              w("### 3-1. `se` 컬럼 고유값 상위 20")
+              w()
+              w("| se 값 | 건수 |")
+              w("|-------|------|")
+              for val, cnt in dfs["se"].fillna("(NaN)").value_counts().head(20).items():
+                  w(f"| `{val}` | {cnt:,} |")
+
+              w()
+              w("### 3-2. '발행한 주식의 총수' 행 샘플 (상위 5)")
+              w()
+              se_clean = dfs["se"].fillna("").astype(str).str.strip()
+              mask_issued = se_clean == "발행한 주식의 총수"
+              w(f"- 정확 일치 행수: **{mask_issued.sum():,}**")
+              if mask_issued.sum() == 0:
+                  w(f"- 폴백(부분일치 '주식의 총수'): **{se_clean.str.contains('주식의 총수', na=False).sum():,}**")
+              sample = dfs[mask_issued].head(5)
+              if not sample.empty:
+                  w()
+                  w("```")
+                  w(sample.to_string(index=False, max_colwidth=20))
+                  w("```")
+
+              w()
+              w("### 3-3. 수량 필드 비어있지 않은 행 비율")
+              w()
+              w("| 필드 | 비어있지않음 | 비율 |")
+              w("|------|-------------|------|")
+              for col in ["isu_stock_totqy", "now_to_isu_stock_totqy", "redc_stock_totqy", "now_to_redc_stock_totqy", "istc_totqy"]:
+                  if col in dfs.columns:
+                      not_empty = dfs[col].fillna("").astype(str).str.strip().replace("-", "").astype(bool).sum()
+                      pct = not_empty / len(dfs) * 100 if len(dfs) else 0
+                      w(f"| `{col}` | {not_empty:,} | {pct:.1f}% |")
+          else:
+              w("❌ **파일이 존재하지 않습니다. Step 3b(`03b_collect_total_shares.py`)가 실행되지 않았거나 아티팩트가 손실됐습니다.**")
+
+          # treasury_raw 심층 진단
+          w()
+          w("## 4. treasury_raw.csv 심층 진단")
+          w()
+          t_path = RAW / "treasury_raw.csv"
+          if t_path.exists():
+              dft = pd.read_csv(t_path, dtype=str)
+              w(f"- 전체 행수: **{len(dft):,}**")
+              w(f"- 컬럼: `{list(dft.columns)}`")
+              w()
+              w("### 4-1. `stock_knd` 고유값 상위 15")
+              w()
+              w("| stock_knd | 건수 |")
+              w("|-----------|------|")
+              for val, cnt in dft["stock_knd"].fillna("(NaN)").value_counts().head(15).items():
+                  w(f"| `{val}` | {cnt:,} |")
+
+              w()
+              w("### 4-2. '보통' 포함 필터 후 행수")
+              w()
+              mask_comm = dft["stock_knd"].fillna("").str.contains("보통", na=False)
+              w(f"- '보통' 포함: **{mask_comm.sum():,}/{len(dft):,}** ({mask_comm.mean()*100:.1f}%)")
+              mask_comm_strict = dft["stock_knd"].fillna("").str.contains("보통주", na=False)
+              w(f"- '보통주' 포함: **{mask_comm_strict.sum():,}/{len(dft):,}** ({mask_comm_strict.mean()*100:.1f}%)")
+
+              w()
+              w("### 4-3. trmend_qy 비어있지않은 행 비율")
+              w()
+              if "trmend_qy" in dft.columns:
+                  not_empty = dft["trmend_qy"].fillna("").astype(str).str.strip().replace("-", "").astype(bool).sum()
+                  w(f"- 비어있지않음: **{not_empty:,}/{len(dft):,}** ({not_empty/len(dft)*100:.1f}%)")
+
+              w()
+              w("### 4-4. 샘플 5행")
+              w()
+              w("```")
+              w(dft.head(5).to_string(index=False, max_colwidth=20))
+              w("```")
+          else:
+              w("❌ `treasury_raw.csv` 파일 없음.")
+
+          # ownership_raw 진단
+          w()
+          w("## 5. ownership_raw.csv 진단")
+          w()
+          o_path = RAW / "ownership_raw.csv"
+          if o_path.exists():
+              dfo = pd.read_csv(o_path, dtype=str)
+              w(f"- 전체 행수: **{len(dfo):,}**")
+              w(f"- 컬럼: `{list(dfo.columns)}`")
+              w()
+              w("### 5-1. `relate` 고유값 상위 15")
+              w()
+              w("| relate | 건수 |")
+              w("|--------|------|")
+              for val, cnt in dfo["relate"].fillna("(NaN)").value_counts().head(15).items():
+                  w(f"| `{val}` | {cnt:,} |")
+
+              w()
+              w("### 5-2. `nm`이 집계행으로 의심되는 값")
+              w()
+              nm_clean = dfo["nm"].fillna("").str.strip()
+              agg_values = nm_clean[nm_clean.isin(["계", "소계", "합계", "최대주주등의 합계", "총계"])]
+              w(f"- 집계행('계'/'소계'/'합계'/'총계'): **{len(agg_values):,}행**")
+              w(f"- 집계행 분포: `{agg_values.value_counts().to_dict()}`")
+
+              w()
+              w("### 5-3. stock_rate 파싱 성공률")
+              w()
+              def parse(s):
+                  if pd.isna(s): return None
+                  s = str(s).strip().replace(",", "").replace("%", "")
+                  if s in ("", "-"): return None
+                  try: return float(s)
+                  except: return None
+              parsed = dfo["stock_rate"].apply(parse)
+              w(f"- 파싱 성공: **{parsed.notna().sum():,}/{len(dfo):,}** ({parsed.notna().mean()*100:.1f}%)")
+              w(f"- 파싱 값 범위: {parsed.min():.2f} ~ {parsed.max():.2f}")
+              w(f"- 파싱 평균: {parsed.mean():.2f}")
+          else:
+              w("❌ `ownership_raw.csv` 파일 없음.")
+
+          # minority_raw 진단
+          w()
+          w("## 6. minority_raw.csv 진단")
+          w()
+          m_path = RAW / "minority_raw.csv"
+          if m_path.exists():
+              dfm = pd.read_csv(m_path, dtype=str)
+              w(f"- 전체 행수: **{len(dfm):,}**")
+              w()
+              w("### 6-1. `se` 고유값 상위 10")
+              w()
+              w("| se | 건수 |")
+              w("|----|------|")
+              for val, cnt in dfm["se"].fillna("(NaN)").value_counts().head(10).items():
+                  w(f"| `{val}` | {cnt:,} |")
+
+          # Step 5 패널 데이터 재검증
+          w()
+          w("## 7. ownership_panel.csv 검증 (있으면)")
+          w()
+          panel_path = RAW / "ownership_panel.csv"
+          if not panel_path.exists():
+              panel_path = PROC / "ownership_panel.csv"
+          if panel_path.exists():
+              dfp = pd.read_csv(panel_path)
+              w(f"- 관측치: **{len(dfp):,}**")
+              w()
+              w("### 7-1. 컬럼별 기본통계")
+              w()
+              cols = ["largest_pct", "related_pct", "treasury_pct", "esop_pct", "friendly_pct", "voting_friendly_pct", "minority_pct"]
+              cols = [c for c in cols if c in dfp.columns]
+              desc = dfp[cols].describe().round(2)
+              w("```")
+              w(desc.to_string())
+              w("```")
+              w()
+              w("### 7-2. NaN 비율")
+              w()
+              w("| 컬럼 | NaN 건수 | NaN 비율 |")
+              w("|------|---------|---------|")
+              for c in cols:
+                  nan_n = dfp[c].isna().sum()
+                  w(f"| `{c}` | {nan_n:,} | {nan_n/len(dfp)*100:.1f}% |")
+          else:
+              w("⚠️ `ownership_panel.csv` 없음.")
+
+          OUT.write_text("\n".join(lines), encoding="utf-8")
+          print(f"진단 보고서 작성 완료: {OUT}")
+          print(f"총 {len(lines)}행")
+          PYEOF
+
+      - name: Commit diagnostics
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add diagnostics/DIAGNOSIS.md
+          if git diff --cached --quiet; then
+            echo "변경사항 없음"
+            exit 0
+          fi
+          git commit -m "diag: 수집 데이터 진단 보고서 자동 생성
+
+workflow: diagnose-data.yml
+run: ${{ github.run_id }}"
+          # 병렬 실행 시 충돌 방지 위해 rebase
+          git pull --rebase origin ${{ github.ref_name }} || true
+          git push origin HEAD:${{ github.ref_name }}
