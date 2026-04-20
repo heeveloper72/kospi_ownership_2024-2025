@@ -49,6 +49,13 @@ jobs:
           download_artifact step4-minority-data
           download_artifact step5-panel-data || true
 
+      - name: Re-run Step 5 (clean & merge) with current fixes
+        run: |
+          mkdir -p data/processed
+          python src/05_clean_merge.py 2>&1 | tee /tmp/step5.log
+          echo "=== Step 5 완료 ==="
+          wc -l data/processed/ownership_panel.csv || true
+
       - name: Run diagnostics
         run: |
           python - <<'PYEOF'
@@ -258,15 +265,16 @@ jobs:
               for val, cnt in dfm["se"].fillna("(NaN)").value_counts().head(10).items():
                   w(f"| `{val}` | {cnt:,} |")
 
-          # Step 5 패널 데이터 재검증
+          # Step 5 패널 데이터 재검증 (방금 재실행한 결과)
           w()
-          w("## 7. ownership_panel.csv 검증 (있으면)")
+          w("## 7. ownership_panel.csv 검증 (Step 5 재실행 결과)")
           w()
-          panel_path = RAW / "ownership_panel.csv"
+          panel_path = PROC / "ownership_panel.csv"
           if not panel_path.exists():
-              panel_path = PROC / "ownership_panel.csv"
+              panel_path = RAW / "ownership_panel.csv"
           if panel_path.exists():
               dfp = pd.read_csv(panel_path)
+              dfp["year"] = dfp["year"].astype(str)
               w(f"- 관측치: **{len(dfp):,}**")
               w()
               w("### 7-1. 컬럼별 기본통계")
@@ -285,8 +293,84 @@ jobs:
               for c in cols:
                   nan_n = dfp[c].isna().sum()
                   w(f"| `{c}` | {nan_n:,} | {nan_n/len(dfp)*100:.1f}% |")
+
+              # ─── 8. 2023 벤치마크 비교 (자본시장연구원 2024) ───
+              w()
+              w("## 8. 2023년 벤치마크 비교 (자본시장연구원 2024)")
+              w()
+              BENCH = {
+                  "total": {"largest": 29.21, "friendly": 43.07},
+                  "KOSPI": {"friendly": 49.34},
+                  "KOSDAQ": {"friendly": 39.93},
+              }
+              df23 = dfp[dfp["year"] == "2023"].copy()
+              w(f"- 2023년 관측치: **{len(df23):,}**")
+              w()
+              w("| 구분 | 지표 | n | 우리 | 벤치마크 | 차이(%p) |")
+              w("|------|------|---|-----|---------|---------|")
+              def rep(name, mask, col, bm):
+                  sub = df23[mask][col].dropna() if mask is not None else df23[col].dropna()
+                  if len(sub) == 0:
+                      w(f"| {name} | {col} | 0 | - | {bm}% | - |")
+                      return
+                  v = sub.mean()
+                  diff = v - bm
+                  w(f"| {name} | {col} | {len(sub):,} | {v:.2f}% | {bm}% | {diff:+.2f} |")
+              rep("전체", None, "largest_pct", BENCH["total"]["largest"])
+              rep("전체", None, "friendly_pct", BENCH["total"]["friendly"])
+              rep("KOSPI", df23["market"] == "KOSPI", "friendly_pct", BENCH["KOSPI"]["friendly"])
+              rep("KOSDAQ", df23["market"] == "KOSDAQ", "friendly_pct", BENCH["KOSDAQ"]["friendly"])
+
+              # ─── 8-b. SPAC/REIT 제외 시 ───
+              w()
+              w("### 8-b. SPAC·REIT 제외 후 (기업인수목적회사/부동산투자)")
+              w()
+              non_spac = ~df23["corp_name"].fillna("").str.contains("스팩|기업인수목적|리츠|부동산투자", regex=True, na=False)
+              df23_f = df23[non_spac].copy()
+              excl = len(df23) - len(df23_f)
+              w(f"- 제외된 기업: **{excl}**개 → 잔여 **{len(df23_f):,}**개")
+              w()
+              w("| 구분 | 지표 | n | 우리 | 벤치마크 | 차이(%p) |")
+              w("|------|------|---|-----|---------|---------|")
+              def rep2(name, mask, col, bm):
+                  sub = df23_f[mask][col].dropna() if mask is not None else df23_f[col].dropna()
+                  if len(sub) == 0:
+                      w(f"| {name} | {col} | 0 | - | {bm}% | - |")
+                      return
+                  v = sub.mean()
+                  diff = v - bm
+                  w(f"| {name} | {col} | {len(sub):,} | {v:.2f}% | {bm}% | {diff:+.2f} |")
+              rep2("전체", None, "largest_pct", BENCH["total"]["largest"])
+              rep2("전체", None, "friendly_pct", BENCH["total"]["friendly"])
+              rep2("KOSPI", df23_f["market"] == "KOSPI", "friendly_pct", BENCH["KOSPI"]["friendly"])
+              rep2("KOSDAQ", df23_f["market"] == "KOSDAQ", "friendly_pct", BENCH["KOSDAQ"]["friendly"])
           else:
-              w("⚠️ `ownership_panel.csv` 없음.")
+              w("⚠️ `ownership_panel.csv` 없음 (Step 5 실패).")
+
+          # ─── 9. 기업 유니버스 breakdown ───
+          w()
+          w("## 9. 기업 유니버스 breakdown")
+          w()
+          lc_path = RAW / "listed_corps.csv"
+          if lc_path.exists():
+              lc = pd.read_csv(lc_path, dtype=str)
+              w(f"- listed_corps.csv 총 **{len(lc):,}**개")
+              w()
+              w("| market | count |")
+              w("|--------|-------|")
+              for m, c in lc["market"].value_counts().items():
+                  w(f"| {m} | {c:,} |")
+              w()
+              # 패턴별 집계
+              patterns = {
+                  "스팩 (기업인수목적회사)": lc["corp_name"].fillna("").str.contains("스팩|기업인수목적", regex=True, na=False),
+                  "리츠 (부동산투자)": lc["corp_name"].fillna("").str.contains("리츠|부동산투자", regex=True, na=False),
+                  "(우) 우선주": lc["corp_name"].fillna("").str.endswith("(우)"),
+              }
+              w("| 패턴 | 매칭 수 |")
+              w("|------|--------|")
+              for name, mask in patterns.items():
+                  w(f"| {name} | {mask.sum():,} |")
 
           OUT.write_text("\n".join(lines), encoding="utf-8")
           print(f"진단 보고서 작성 완료: {OUT}")

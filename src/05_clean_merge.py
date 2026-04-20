@@ -40,20 +40,28 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
     df_own = df_own[~agg_mask].copy()
 
     df_own["stock_rate_f"] = df_own["stock_rate"].apply(parse_rate)
+    # relate 정규화 (strip) — 공백 포함/제거된 같은 값 통합
+    df_own["relate_clean"] = df_own["relate"].fillna("").astype(str).str.strip()
 
     results = []
     for (corp_code, year), grp in df_own.groupby(["corp_code", "year"]):
         corp_name = grp["corp_name"].iloc[0]
         market = grp["market"].iloc[0]
 
-        # 최대주주 본인: relate에 "본인" 포함
-        mask_self = grp["relate"].str.contains("본인", na=False)
+        # 최대주주 본인 식별:
+        #   (1) relate == "본인" / "최대주주" / "최대주주 본인" 정확일치
+        #   (2) relate 에 "본인" 포함 (예: "본인(대표이사)")
+        # DART 공시에서 기업마다 표기가 달라 OR 조합 사용.
+        mask_self = (
+            grp["relate_clean"].isin(["본인", "최대주주", "최대주주 본인"])
+            | grp["relate_clean"].str.contains("본인", na=False)
+        )
         largest_pct = grp.loc[mask_self, "stock_rate_f"].sum() if mask_self.any() else np.nan
 
         # 우리사주: nm 또는 relate에 "우리사주" 포함
         mask_esop = (
-            grp["nm"].str.contains("우리사주", na=False)
-            | grp["relate"].str.contains("우리사주", na=False)
+            grp["nm"].fillna("").str.contains("우리사주", na=False)
+            | grp["relate_clean"].str.contains("우리사주", na=False)
         )
         esop_pct = grp.loc[mask_esop, "stock_rate_f"].sum() if mask_esop.any() else 0.0
 
@@ -88,36 +96,29 @@ def _parse_count(val: object) -> float:
 
 
 def _pick_total_shares(row: pd.Series) -> float:
-    """stockTotqySttus 응답의 여러 필드 중 실제 '발행주식 총수'에 해당하는 값 선택.
+    """stockTotqySttus 응답에서 '현재 발행주식 총수' 선택.
 
     우선순위:
-      1) istc_totqy (유통주식총수 = 발행누적 − 감소누적, 가장 정확한 '현재 발행주식')
-      2) now_to_isu_stock_totqy − now_to_redc_stock_totqy (있으면)
+      1) istc_totqy (유통주식총수 = 발행누적 − 감소누적, 가장 정확)
+      2) now_to_isu_stock_totqy − now_to_redc_stock_totqy
       3) now_to_isu_stock_totqy (감소분 없을 때)
-      4) isu_stock_totqy (정관상 한도이지만 최후의 폴백)
+
+    주의: `isu_stock_totqy`는 정관상 '발행할 주식의 총수'(한도)이므로
+    실제 발행주식수와 무관하여 폴백으로 사용 금지. 위 3개가 모두 비면 NaN.
     """
-    candidates = {
-        "istc_totqy":              _parse_count(row.get("istc_totqy", "")),
-        "now_to_isu":              _parse_count(row.get("now_to_isu_stock_totqy", "")),
-        "now_to_redc":             _parse_count(row.get("now_to_redc_stock_totqy", "")),
-        "isu_stock_totqy":         _parse_count(row.get("isu_stock_totqy", "")),
-    }
+    istc = _parse_count(row.get("istc_totqy", ""))
+    now_isu = _parse_count(row.get("now_to_isu_stock_totqy", ""))
+    now_redc = _parse_count(row.get("now_to_redc_stock_totqy", ""))
 
-    # 1순위: istc_totqy
-    if not np.isnan(candidates["istc_totqy"]) and candidates["istc_totqy"] > 0:
-        return candidates["istc_totqy"]
+    if not np.isnan(istc) and istc > 0:
+        return istc
 
-    # 2·3순위: 발행누적 − 감소누적
-    if not np.isnan(candidates["now_to_isu"]) and candidates["now_to_isu"] > 0:
-        redc = candidates["now_to_redc"] if not np.isnan(candidates["now_to_redc"]) else 0.0
-        diff = candidates["now_to_isu"] - redc
+    if not np.isnan(now_isu) and now_isu > 0:
+        redc = now_redc if not np.isnan(now_redc) else 0.0
+        diff = now_isu - redc
         if diff > 0:
             return diff
-        return candidates["now_to_isu"]
-
-    # 4순위: isu_stock_totqy (폴백)
-    if not np.isnan(candidates["isu_stock_totqy"]) and candidates["isu_stock_totqy"] > 0:
-        return candidates["isu_stock_totqy"]
+        return now_isu
 
     return np.nan
 
@@ -132,28 +133,45 @@ def process_treasury(
     df_shares: total_shares_raw.csv 로드 결과 (없으면 NaN)
     """
     # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
-    # "보통주" 대신 "보통"으로 검색 (보통주식, 보통주 등 다양한 표현 수용)
-    logger.info(f"  자사주 stock_knd 고유값: {df_tres['stock_knd'].fillna('').unique().tolist()[:10]}")
-    df_tres = df_tres[df_tres["stock_knd"].str.contains("보통", na=False)].copy()
+    # "보통주" 대신 "보통"으로 검색 (보통주식, 기명식보통주, ' 보통주 ' 등 수용)
+    df_tres = df_tres.copy()
+    df_tres["stock_knd_clean"] = df_tres["stock_knd"].fillna("").astype(str).str.strip()
+    logger.info(f"  자사주 stock_knd 고유값 상위: {df_tres['stock_knd_clean'].value_counts().head(10).to_dict()}")
+    df_tres = df_tres[df_tres["stock_knd_clean"].str.contains("보통", na=False)].copy()
     logger.info(f"  보통주 필터 후: {len(df_tres):,}행")
     df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(_parse_count)
 
-    # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares
+    # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares (보통주 기준)
+    # DART stockTotqySttus 응답의 se 컬럼은 "합계"/"보통주"/"보통주식"/"우선주"/"비고" 등.
+    # treasury_raw를 보통주로 필터하므로 분모도 보통주 기준으로 맞춘다.
+    # 보통주 행이 없는 기업-연도는 "합계"로 폴백 (단일 주식종류 기업).
     shares_dict: dict[tuple[str, str], float] = {}
     if df_shares is not None and not df_shares.empty:
-        # '발행한 주식의 총수' 구분 정확 일치 (부분일치는 '발행한 주식의 증감내역' 등을 오염시킬 수 있음)
         se_clean = df_shares["se"].fillna("").astype(str).str.strip()
-        mask_issued = se_clean == "발행한 주식의 총수"
-        if mask_issued.sum() == 0:
-            # 폴백: 정확 일치 행이 없을 때 '주식의 총수' 포함 행 사용
-            mask_issued = se_clean.str.contains("주식의 총수", na=False)
 
-        df_issued = df_shares[mask_issued].copy()
-        for _, row in df_issued.iterrows():
+        # 1순위: "보통" 포함 (보통주, 보통주식, 기명식보통주 등)
+        mask_common = se_clean.str.contains("보통", na=False)
+        df_common = df_shares[mask_common].copy()
+        logger.info(f"  총발행주식수: '보통' 포함 행 {len(df_common):,}건")
+        for _, row in df_common.iterrows():
             key = (str(row["corp_code"]), str(row["year"]))
+            val = _pick_total_shares(row)
+            if not np.isnan(val) and val > 0 and key not in shares_dict:
+                shares_dict[key] = val
+
+        # 2순위: "합계" 행 — 보통주 행이 없는 기업-연도에만 적용 (단일 주식종류)
+        mask_sum = se_clean == "합계"
+        df_sum = df_shares[mask_sum].copy()
+        fallback_used = 0
+        for _, row in df_sum.iterrows():
+            key = (str(row["corp_code"]), str(row["year"]))
+            if key in shares_dict:
+                continue
             val = _pick_total_shares(row)
             if not np.isnan(val) and val > 0:
                 shares_dict[key] = val
+                fallback_used += 1
+        logger.info(f"  총발행주식수: '합계' 폴백 {fallback_used:,}건, 총 shares_dict {len(shares_dict):,}건")
 
     results = []
     for (corp_code, year), grp in df_tres.groupby(["corp_code", "year"]):
