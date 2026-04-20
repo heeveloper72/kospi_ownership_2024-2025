@@ -33,6 +33,12 @@ def parse_rate(s: str | float) -> float:
 
 def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
     """ownership_raw.csv에서 최대주주/특수관계인/우리사주 지분율 추출."""
+    # DART API 응답의 소계 집계행 제거 ("계", "소계", "합계" 행은 개별 주주가 아닌 합산행)
+    agg_mask = df_own["nm"].fillna("").str.strip().isin(["계", "소계", "합계"])
+    if agg_mask.any():
+        logger.info(f"  집계행 제거: {agg_mask.sum():,}행 (nm='계'/'소계'/'합계')")
+    df_own = df_own[~agg_mask].copy()
+
     df_own["stock_rate_f"] = df_own["stock_rate"].apply(parse_rate)
 
     results = []
@@ -126,7 +132,10 @@ def process_treasury(
     df_shares: total_shares_raw.csv 로드 결과 (없으면 NaN)
     """
     # 보통주만 필터 — 우선주 자사주는 의결권이 없으므로 제외
-    df_tres = df_tres[df_tres["stock_knd"].str.contains("보통주", na=False)].copy()
+    # "보통주" 대신 "보통"으로 검색 (보통주식, 보통주 등 다양한 표현 수용)
+    logger.info(f"  자사주 stock_knd 고유값: {df_tres['stock_knd'].fillna('').unique().tolist()[:10]}")
+    df_tres = df_tres[df_tres["stock_knd"].str.contains("보통", na=False)].copy()
+    logger.info(f"  보통주 필터 후: {len(df_tres):,}행")
     df_tres["trmend_qy_f"] = df_tres["trmend_qy"].apply(_parse_count)
 
     # 총발행주식수 조회용 딕셔너리: (corp_code, year) → total_shares
@@ -209,6 +218,8 @@ def main() -> None:
             logger.info("total_shares_raw.csv 로드 중 (자사주 비율 계산용)...")
             df_shares = pd.read_csv(shares_path, dtype=str)
             logger.info(f"  {len(df_shares)}행 로드")
+            if not df_shares.empty and "se" in df_shares.columns:
+                logger.info(f"  se 고유값 상위 10: {df_shares['se'].value_counts().head(10).to_dict()}")
         else:
             logger.warning("total_shares_raw.csv 없음 → treasury_pct = NaN (03b 스크립트 실행 필요)")
 
