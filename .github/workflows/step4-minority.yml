@@ -2,7 +2,14 @@ name: "Step 4 — 소액주주 데이터 수집"
 
 on:
   workflow_dispatch:
-  # schedule 제거 — Step 3 완료 시 자동 트리거되므로 별도 스케줄 불필요
+    inputs:
+      force_reset:
+        description: "기존 minority 데이터 삭제 후 전체 재수집"
+        type: boolean
+        default: false
+  schedule:
+    # 매일 UTC 02:00 (한국 11:00) 자동 실행 — Step 3 완료 후 이어서 수집
+    - cron: "0 2 * * *"
 
 concurrency:
   group: step4-minority
@@ -13,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
+      actions: write   # Step 5 자동 트리거용
 
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +110,43 @@ jobs:
             echo "⚠️  카운터 날짜 불일치 (저장: $COUNTER_DATE, 오늘: $TODAY) — 새 카운터 사용"
           fi
 
-      - name: Restore previous minority data
+      # ── force_reset 시 기존 데이터 백업 후 초기화 ───────────────────────
+      - name: Backup existing minority data before force_reset
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/backup_data
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step4-minority-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "기존 minority 데이터 백업용 다운로드 중 (id=$ARTIFACT_ID)..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup.zip
+            unzip -o /tmp/backup.zip -d /tmp/backup_data/
+            echo "✅ 백업 다운로드 완료"
+          else
+            echo "백업할 기존 데이터 없음"
+          fi
+
+      - name: Upload backup artifact (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: step4-minority-data-backup-${{ github.run_id }}
+          path: /tmp/backup_data/
+          retention-days: 30
+
+      - name: Reset minority checkpoint (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        run: |
+          echo "⚠️  force_reset=true — 체크포인트 초기화 및 CSV 삭제"
+          echo '{"completed": {}}' > data/raw/minority_checkpoint.json
+          rm -f data/raw/minority_raw.csv
+          echo "✅ 초기화 완료 — 전체 재수집 시작"
+
+      - name: Restore previous minority data (일반 실행)
+        if: github.event_name != 'workflow_dispatch' || inputs.force_reset != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -164,8 +207,10 @@ jobs:
           retention-days: 90
           overwrite: true
 
-      # ── Step 4 완료 시 수집 파이프라인 완료 안내 ────────────────────────
-      - name: Check collection complete
+      # ── Step 4 완료 시 Step 5 자동 트리거 ───────────────────────────────
+      - name: Auto-trigger Step 5 if complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python - <<'PYEOF'
           import json
@@ -176,11 +221,18 @@ jobs:
           total = (sum(1 for _ in open("data/raw/listed_corps.csv")) - 1) * 11
 
           if done >= total:
-              print("🎉 Step 2~4 전체 수집 완료!")
-              print("다음 단계: GitHub Actions에서 Step 5 (Clean & Merge) 수동 실행")
+              Path("/tmp/trigger_step5").write_text("true")
+              print(f"✅ Step 4 완료 ({done:,}/{total:,}) → Step 5 트리거 예정")
           else:
-              print(f"⏳ Step 4 진행중 ({done:,}/{total:,}) — 내일 자동 재개")
+              Path("/tmp/trigger_step5").write_text("false")
+              print(f"⏳ Step 4 미완료 ({done:,}/{total:,}) — 내일 자동 재개")
           PYEOF
+
+          if [ "$(cat /tmp/trigger_step5)" = "true" ]; then
+            echo "Step 5 워크플로우 트리거 중..."
+            gh workflow run step5-clean-merge.yml --ref "${{ github.ref_name }}"
+            echo "✅ Step 5 트리거 완료 — 수집 파이프라인 완료, 정제/분석 시작"
+          fi
 
       - name: Summary
         if: always()

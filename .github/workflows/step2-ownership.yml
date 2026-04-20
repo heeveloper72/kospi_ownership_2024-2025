@@ -53,6 +53,33 @@ jobs:
           unzip -o /tmp/step1.zip -d data/raw/
           echo "상장사 $(tail -n +2 data/raw/listed_corps.csv | wc -l | tr -d ' ')개 로드"
 
+      - name: Backup existing data before force_reset
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/backup_data
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step2-ownership-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "기존 ownership 데이터 백업용 다운로드 중 (id=$ARTIFACT_ID)..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup.zip
+            unzip -o /tmp/backup.zip -d /tmp/backup_data/
+            echo "has_backup=true" > /tmp/backup_flag
+          else
+            echo "백업할 기존 데이터 없음"
+            echo "has_backup=false" > /tmp/backup_flag
+          fi
+
+      - name: Upload backup artifact (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: step2-ownership-data-backup-${{ github.run_id }}
+          path: /tmp/backup_data/
+          retention-days: 30
+
       - name: Restore previous ownership data (체크포인트 + CSV)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

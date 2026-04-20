@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read
+      actions: write   # Step 6 자동 트리거용
 
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +43,8 @@ jobs:
           }
 
           download_artifact step2-ownership-data   # ownership_raw.csv (필수)
-          download_artifact step3-treasury-data    # treasury_raw.csv  (선택)
-          download_artifact step4-minority-data    # minority_raw.csv  (선택)
+          download_artifact step3-treasury-data    # treasury_raw.csv + total_shares_raw.csv (선택)
+          download_artifact step4-minority-data    # minority_raw.csv (선택)
 
           # 필수 파일 확인
           if [ ! -f data/raw/ownership_raw.csv ]; then
@@ -54,6 +54,18 @@ jobs:
 
           ROWS=$(tail -n +2 data/raw/ownership_raw.csv | wc -l | tr -d ' ')
           echo "ownership_raw.csv: ${ROWS}행"
+
+          # treasury_raw.csv trmend_rate 컬럼 존재 확인
+          if [ -f data/raw/treasury_raw.csv ]; then
+            python - <<'PYEOF'
+          import pandas as pd
+          df = pd.read_csv("data/raw/treasury_raw.csv", nrows=1)
+          if "trmend_rate" in df.columns:
+              print("✅ treasury_raw.csv — trmend_rate 컬럼 존재")
+          else:
+              print("::warning::treasury_raw.csv — trmend_rate 컬럼 없음 (Step 3 재수집 필요)")
+          PYEOF
+          fi
 
       - name: Run Step 5
         run: python src/05_clean_merge.py
@@ -65,6 +77,14 @@ jobs:
           path: data/processed/ownership_panel.csv
           retention-days: 90
           overwrite: true
+
+      - name: Auto-trigger Step 6
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Step 6 워크플로우 트리거 중..."
+          gh workflow run step6-analyze.yml --ref "${{ github.ref_name }}"
+          echo "✅ Step 6 트리거 완료"
 
       - name: Summary
         run: |
@@ -81,6 +101,7 @@ jobs:
               f"| KOSDAQ | {(df['market']=='KOSDAQ').sum():,}건 |",
               f"| 최대주주 평균 | {df['largest_pct'].mean():.2f}% |",
               f"| 우호지분 평균 | {df['friendly_pct'].mean():.2f}% |",
+              f"| 자사주 평균 | {df['treasury_pct'].mean():.2f}% |",
           ]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("\n".join(lines))

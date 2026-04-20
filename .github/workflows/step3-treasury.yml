@@ -2,7 +2,14 @@ name: "Step 3 — 자사주 + 총발행주식수 수집"
 
 on:
   workflow_dispatch:
-  # schedule 제거 — Step 2 완료 시 자동 트리거되므로 별도 스케줄 불필요
+    inputs:
+      force_reset:
+        description: "기존 treasury/total_shares 데이터 삭제 후 전체 재수집 (trmend_rate 추가 등 스키마 변경 시 사용)"
+        type: boolean
+        default: false
+  schedule:
+    # 매일 UTC 01:00 (한국 10:00) 자동 실행 — Step 2 완료 후 이어서 수집
+    - cron: "0 1 * * *"
 
 concurrency:
   group: step3-treasury
@@ -103,7 +110,44 @@ jobs:
             echo "⚠️  카운터 날짜 불일치 (저장: $COUNTER_DATE, 오늘: $TODAY) — 새 카운터 사용"
           fi
 
-      - name: Restore previous treasury + total_shares data
+      # ── force_reset 시 기존 데이터 백업 후 초기화 ───────────────────────
+      - name: Backup existing treasury data before force_reset
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/backup_data
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step3-treasury-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "기존 treasury 데이터 백업용 다운로드 중 (id=$ARTIFACT_ID)..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup.zip
+            unzip -o /tmp/backup.zip -d /tmp/backup_data/
+            echo "✅ 백업 다운로드 완료"
+          else
+            echo "백업할 기존 데이터 없음"
+          fi
+
+      - name: Upload backup artifact (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: step3-treasury-data-backup-${{ github.run_id }}
+          path: /tmp/backup_data/
+          retention-days: 30
+
+      - name: Reset treasury checkpoints (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        run: |
+          echo "⚠️  force_reset=true — 체크포인트 초기화 및 CSV 삭제"
+          echo '{"completed": {}}' > data/raw/treasury_checkpoint.json
+          echo '{"completed": {}}' > data/raw/total_shares_checkpoint.json
+          rm -f data/raw/treasury_raw.csv data/raw/total_shares_raw.csv
+          echo "✅ 초기화 완료 — 전체 재수집 시작"
+
+      - name: Restore previous treasury + total_shares data (일반 실행)
+        if: github.event_name != 'workflow_dispatch' || inputs.force_reset != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -152,7 +196,7 @@ jobs:
 
           echo "already_done=$(cat /tmp/step3_already_done)" >> $GITHUB_OUTPUT
 
-      - name: Run Step 3 — 자사주 수량 수집 (미완료 시에만)
+      - name: Run Step 3 — 자사주 수집 (미완료 시에만)
         if: steps.pre_check.outputs.already_done == 'false'
         run: python src/03_collect_treasury.py
 
