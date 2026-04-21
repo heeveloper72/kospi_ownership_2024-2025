@@ -25,7 +25,7 @@ CANARY_YEAR = "2023"
 
 REQUIRED_FIELDS = {
     "hyslrSttus": ["nm", "relate", "trmend_posesn_stock_co", "trmend_posesn_stock_qota_rt"],
-    "tesstkAcqsDspsSttus": ["stock_knd", "bsis_qy", "trmend_qy"],
+    "tesstkAcqsDspsSttus": ["stock_knd", "bsis_qy", "trmend_qy", "trmend_rate"],
     "mrhlSttus": ["se", "shrholdr_co", "hold_stock_rate"],
     # stockTotqySttus: se 필드 필수, 수량 필드는 여러 후보 중 하나라도 있으면 통과
     "stockTotqySttus": ["se"],
@@ -153,10 +153,12 @@ def validate_treasury() -> bool:
         else:
             logger.info(f"  ✅ 필드 존재 확인 완료")
 
-        # trmend_rate 존재 여부 확인 (API에 없을 것으로 예상)
+        # trmend_rate 존재 확인 (DART 스펙 제공 필드 — treasury_pct 1순위 소스)
         has_trmend_rate = any("trmend_rate" in item for item in data["list"])
-        symbol = "❌" if has_trmend_rate else "✅"
-        logger.info(f"  {symbol} trmend_rate 필드: {'있음 (예상 외!)' if has_trmend_rate else '없음 (예상대로)'}")
+        symbol = "✅" if has_trmend_rate else "❌"
+        logger.info(f"  {symbol} trmend_rate 필드: {'있음 (정상)' if has_trmend_rate else '없음 (이상 — Step 3 수집 불능)'}")
+        if not has_trmend_rate:
+            all_passed = False
 
     return all_passed
 
