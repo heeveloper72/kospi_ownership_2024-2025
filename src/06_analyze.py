@@ -6,9 +6,18 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.decomposition import PCA
+from sklearn.metrics import adjusted_rand_score, silhouette_score
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import StandardScaler
+
+try:
+    from stepmix.stepmix import StepMix as _StepMix
+    _STEPMIX_AVAILABLE = True
+except ImportError:
+    _StepMix = None
+    _STEPMIX_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,7 +38,7 @@ BENCHMARK = {
 
 # H4 클러스터링 입력 피처
 CLUSTER_FEATURES = ["largest_pct", "related_pct", "treasury_pct", "friendly_pct"]
-CLUSTER_K_RANGE = range(2, 7)
+CLUSTER_K_RANGE = range(3, 9)
 CLUSTER_RANDOM_STATE = 42
 
 
@@ -101,11 +110,43 @@ def compare_benchmark(df: pd.DataFrame) -> None:
         logger.info(f"[KOSDAQ] 우호지분: {friendly_kosdaq:.2f}% (벤치마크: {bm_kd}%, 차이: {friendly_kosdaq - bm_kd:+.2f}%p)")
 
 
-def run_h4_clustering(df: pd.DataFrame) -> pd.DataFrame:
-    """H4: 소유구조 4차원(largest/related/treasury/friendly)에 PCA+GMM 적용.
+def logit_transform(X_pct: np.ndarray, lower: float = 0.5, upper: float = 99.5) -> np.ndarray:
+    """백분율(0~100) → 윈저화 후 로짓 변환 log(p/(1-p))."""
+    X = np.clip(X_pct, lower, upper) / 100.0
+    return np.log(X / (1.0 - X))
 
-    반환: corp_code, year, 피처, cluster_label, pc1, pc2 컬럼을 포함한 데이터프레임.
-    산출물: cluster_labels_by_year.csv, pca_loadings.csv, bic_aic_scores.csv
+
+def _select_k(X_std: np.ndarray) -> tuple[int, pd.DataFrame]:
+    """GMM BIC + Silhouette로 최적 k 선택. BIC 최소 k 반환."""
+    scores = []
+    for k in CLUSTER_K_RANGE:
+        gmm = GaussianMixture(
+            n_components=k, covariance_type="full",
+            random_state=CLUSTER_RANDOM_STATE, n_init=5, max_iter=200,
+        )
+        labels = gmm.fit_predict(X_std)
+        n_unique = len(np.unique(labels))
+        sil = float(silhouette_score(X_std, labels)) if n_unique > 1 else np.nan
+        scores.append({
+            "k": k,
+            "bic": gmm.bic(X_std),
+            "aic": gmm.aic(X_std),
+            "silhouette": round(sil, 4) if not np.isnan(sil) else np.nan,
+            "converged": bool(gmm.converged_),
+        })
+    score_df = pd.DataFrame(scores)
+    best_k = int(score_df.loc[score_df["bic"].idxmin(), "k"])
+    best_sil = score_df.loc[score_df["k"] == best_k, "silhouette"].values[0]
+    sil_str = f"{best_sil:.3f}" if not np.isnan(best_sil) else "nan"
+    logger.info(f"k 선택 (BIC 최소): {best_k} | Silhouette@{best_k}: {sil_str}")
+    return best_k, score_df
+
+
+def run_h4_clustering(df: pd.DataFrame) -> pd.DataFrame:
+    """H4: 소유구조 4차원에 로짓 변환 → 표준화 → PCA + GMM/Ward/LCA 클러스터링.
+
+    산출물: cluster_labels_by_year.csv, pca_loadings.csv,
+             bic_aic_scores.csv, clustering_ari_matrix.csv
     """
     missing = [c for c in CLUSTER_FEATURES if c not in df.columns]
     if missing:
@@ -121,10 +162,13 @@ def run_h4_clustering(df: pd.DataFrame) -> pd.DataFrame:
         logger.warning(f"H4 클러스터링 스킵 — 유효 관측치 부족 ({len(work)})")
         return pd.DataFrame()
 
-    X = work[CLUSTER_FEATURES].to_numpy()
+    # 로짓 변환 → 표준화
+    X_pct = work[CLUSTER_FEATURES].to_numpy()
+    X_logit = logit_transform(X_pct)
     scaler = StandardScaler()
-    X_std = scaler.fit_transform(X)
+    X_std = scaler.fit_transform(X_logit)
 
+    # PCA (2 PC — 시각화용)
     pca = PCA(n_components=2, random_state=CLUSTER_RANDOM_STATE)
     X_pca = pca.fit_transform(X_std)
     logger.info(
@@ -133,33 +177,69 @@ def run_h4_clustering(df: pd.DataFrame) -> pd.DataFrame:
         f"누적={pca.explained_variance_ratio_.sum():.3f}"
     )
 
-    # BIC/AIC로 k 선택
-    scores = []
-    for k in CLUSTER_K_RANGE:
-        gmm = GaussianMixture(
-            n_components=k, covariance_type="full",
-            random_state=CLUSTER_RANDOM_STATE, n_init=5, max_iter=200,
-        )
-        gmm.fit(X_std)
-        scores.append({"k": k, "bic": gmm.bic(X_std), "aic": gmm.aic(X_std),
-                       "converged": bool(gmm.converged_)})
-    bic_df = pd.DataFrame(scores)
-    best_k = int(bic_df.loc[bic_df["bic"].idxmin(), "k"])
-    logger.info(f"GMM 최적 k (BIC 최소): {best_k}")
-    bic_df.to_csv(DATA_OUTPUT / "bic_aic_scores.csv", index=False, encoding="utf-8-sig")
+    # k 선택 (BIC + Silhouette)
+    best_k, score_df = _select_k(X_std)
+    score_df.to_csv(DATA_OUTPUT / "bic_aic_scores.csv", index=False, encoding="utf-8-sig")
 
+    # GMM 최종 피팅
     gmm = GaussianMixture(
         n_components=best_k, covariance_type="full",
         random_state=CLUSTER_RANDOM_STATE, n_init=5, max_iter=200,
     )
-    labels = gmm.fit_predict(X_std)
+    gmm_labels = gmm.fit_predict(X_std)
 
-    work["cluster_label"] = labels.astype(int)
+    # Ward 계층적 클러스터링
+    ward = AgglomerativeClustering(n_clusters=best_k, linkage="ward")
+    ward_labels = ward.fit_predict(X_std)
+
+    # LCA (stepmix) — 가능 시
+    lca_labels: np.ndarray | None = None
+    if _STEPMIX_AVAILABLE:
+        try:
+            lca = _StepMix(
+                n_components=best_k, measurement="continuous",
+                random_state=CLUSTER_RANDOM_STATE, n_init=5, max_iter=200,
+                verbose=0,
+            )
+            lca.fit(X_std)
+            lca_labels = lca.predict(X_std)
+            logger.info("LCA (stepmix) 클러스터링 완료")
+        except Exception as e:
+            logger.warning(f"LCA 클러스터링 실패: {e}")
+    else:
+        logger.info("stepmix 미설치 — LCA 스킵 (pip install stepmix)")
+
+    # ARI 교차비교 행렬
+    method_labels: dict[str, np.ndarray] = {"GMM": gmm_labels, "Ward": ward_labels}
+    if lca_labels is not None:
+        method_labels["LCA"] = lca_labels
+
+    methods = list(method_labels.keys())
+    ari_matrix = pd.DataFrame(index=methods, columns=methods, dtype=float)
+    for m1 in methods:
+        for m2 in methods:
+            ari_matrix.loc[m1, m2] = (
+                1.0 if m1 == m2
+                else round(float(adjusted_rand_score(method_labels[m1], method_labels[m2])), 4)
+            )
+    ari_matrix.to_csv(DATA_OUTPUT / "clustering_ari_matrix.csv", encoding="utf-8-sig")
+    logger.info(f"\n=== 클러스터링 방법 ARI 행렬 ===\n{ari_matrix}")
+
+    # 결과 저장 (GMM 레이블 기준 + 방법별 레이블 병렬 저장)
+    work["cluster_label"] = gmm_labels.astype(int)
+    work["cluster_label_ward"] = ward_labels.astype(int)
+    if lca_labels is not None:
+        work["cluster_label_lca"] = lca_labels.astype(int)
     work["pc1"] = X_pca[:, 0]
     work["pc2"] = X_pca[:, 1]
 
-    keep_cols = ["corp_code", "corp_name", "market", "year",
-                 *CLUSTER_FEATURES, "cluster_label", "pc1", "pc2"]
+    lca_col = ["cluster_label_lca"] if lca_labels is not None else []
+    keep_cols = [
+        "corp_code", "corp_name", "market", "year",
+        *CLUSTER_FEATURES,
+        "cluster_label", "cluster_label_ward", *lca_col,
+        "pc1", "pc2",
+    ]
     existing_cols = [c for c in keep_cols if c in work.columns]
     work[existing_cols].to_csv(
         DATA_OUTPUT / "cluster_labels_by_year.csv",
@@ -176,19 +256,30 @@ def run_h4_clustering(df: pd.DataFrame) -> pd.DataFrame:
     loadings.to_csv(DATA_OUTPUT / "pca_loadings.csv", encoding="utf-8-sig")
 
     cluster_summary = work.groupby("cluster_label")[CLUSTER_FEATURES].mean().round(2)
-    logger.info(f"\n=== 클러스터별 평균 ({best_k}개 클러스터) ===\n{cluster_summary}")
+    logger.info(f"\n=== GMM 클러스터별 평균 ({best_k}개 클러스터) ===\n{cluster_summary}")
 
     return work
 
 
-def compute_transition_matrix(labeled: pd.DataFrame) -> pd.DataFrame:
-    """기업별 연도 t → t+1 클러스터 전이 확률 행렬."""
+def compute_transition_matrix(
+    labeled: pd.DataFrame,
+    period_label: str = "전체",
+    year_range: tuple[int, int] | None = None,
+) -> pd.DataFrame:
+    """기업별 연도 t → t+1 클러스터 전이 확률 행렬.
+
+    year_range: (start_year, end_year) 포함 구간. None이면 전체 기간.
+    """
     if labeled.empty or "cluster_label" not in labeled.columns:
         return pd.DataFrame()
 
     tmp = labeled[["corp_code", "year", "cluster_label"]].copy()
     tmp["year_int"] = pd.to_numeric(tmp["year"], errors="coerce").astype("Int64")
     tmp = tmp.dropna(subset=["year_int"]).sort_values(["corp_code", "year_int"])
+
+    if year_range is not None:
+        start_y, end_y = year_range
+        tmp = tmp[tmp["year_int"].between(start_y, end_y)]
 
     transitions = []
     for corp_code, grp in tmp.groupby("corp_code"):
@@ -203,20 +294,27 @@ def compute_transition_matrix(labeled: pd.DataFrame) -> pd.DataFrame:
             prev_year = year
 
     if not transitions:
-        logger.warning("전이쌍 없음 — Markov 전이행렬 스킵")
+        logger.warning(f"[{period_label}] 전이쌍 없음 — Markov 전이행렬 스킵")
         return pd.DataFrame()
 
     trans_df = pd.DataFrame(transitions)
     counts = trans_df.groupby(["from", "to"]).size().unstack(fill_value=0).sort_index()
-    counts = counts.reindex(columns=sorted(counts.columns.union(counts.index)), fill_value=0)
-    counts = counts.reindex(index=counts.columns, fill_value=0)
+    all_labels = sorted(counts.columns.union(counts.index).tolist())
+    counts = counts.reindex(index=all_labels, columns=all_labels, fill_value=0)
     row_sums = counts.sum(axis=1).replace(0, np.nan)
     probs = counts.div(row_sums, axis=0).fillna(0).round(4)
 
-    probs.to_csv(DATA_OUTPUT / "transition_matrix.csv", encoding="utf-8-sig")
-    counts.to_csv(DATA_OUTPUT / "transition_counts.csv", encoding="utf-8-sig")
-    logger.info(f"Markov 전이행렬 ({probs.shape[0]}x{probs.shape[1]}) 저장: transition_matrix.csv")
-    logger.info(f"\n=== 대각(지속성) 확률 ===\n{pd.Series(np.diag(probs), index=probs.index).round(3)}")
+    suffix = period_label.replace(" ", "_")
+    probs.to_csv(DATA_OUTPUT / f"transition_matrix_{suffix}.csv", encoding="utf-8-sig")
+    counts.to_csv(DATA_OUTPUT / f"transition_counts_{suffix}.csv", encoding="utf-8-sig")
+    logger.info(
+        f"[{period_label}] Markov 전이행렬 ({probs.shape[0]}x{probs.shape[1]}) 저장: "
+        f"transition_matrix_{suffix}.csv"
+    )
+    logger.info(
+        f"\n=== [{period_label}] 대각(지속성) 확률 ===\n"
+        f"{pd.Series(np.diag(probs.values), index=probs.index).round(3)}"
+    )
     return probs
 
 
@@ -260,11 +358,17 @@ def main() -> None:
     # 벤치마크 비교
     compare_benchmark(df)
 
-    # H4: PCA + GMM 클러스터링 + Markov 전이행렬
-    logger.info("\n=== H4 클러스터링 (PCA + GMM) ===")
+    # H4: 로짓 변환 → PCA + GMM/Ward/LCA 클러스터링
+    logger.info("\n=== H4 클러스터링 (로짓 변환 → PCA + GMM/Ward/LCA) ===")
+    if not _STEPMIX_AVAILABLE:
+        logger.warning("stepmix 미설치 — LCA 스킵. pip install stepmix 후 재실행 권장")
     labeled = run_h4_clustering(df)
+
     if not labeled.empty:
-        compute_transition_matrix(labeled)
+        # Markov 전이행렬: 전체 기간 / 2015-2023 (학습 구간) / 2024 (검증 구간)
+        compute_transition_matrix(labeled, "전체")
+        compute_transition_matrix(labeled, "2015-2023", year_range=(2015, 2023))
+        compute_transition_matrix(labeled, "2024", year_range=(2024, 2024))
 
 
 if __name__ == "__main__":

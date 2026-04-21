@@ -168,10 +168,41 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 ## 우선순위 및 권고
 
 1. **Step 3 재수집 완료 대기** (4/21~4/27) — 이미 시작됨, 현재 상태 유지
-2. **카나리아 L158–159 수정** — Step 3 수집 중 짧은 코드 수정으로 처리 가능
+2. ~~카나리아 L158–159 수정~~ ✅ 완료 (2026-04-22)
 3. **H4 분석 즉시 진행** — 4/27 이후 추가 API 없이 바로 시작
 4. **재무데이터 수집 파이프라인 구축** (`step8-financial.yml`) — Step 3 완료 후 바로 연결
-5. **연구 가설 범위 재조정 협의 필요** — H3(Tobin Q)는 KRX 데이터 수집 비용 크므로 research leader와 제외 여부 논의 권장
+5. **연구 가설 범위 재조정 완료** — H3(Tobin Q) 포함 확정, KRX 시총 수집 계획 수립
+
+---
+
+## 일일 브리핑 지침 (Claude Code 운영 원칙)
+
+**매일 하루의 첫 메시지를 받을 때마다 다음을 먼저 보고한다:**
+
+1. **수집 현황**: Step 3 진행도(예상 누적 건수 / 58,542), 완료 예정일
+2. **금일 to-do 목록**: 우선순위 순, 블로커 명시
+3. **일정 단축 가능 여지**: 있으면 구체적 제안 포함
+4. **대기 중인 결정 사항**: 리더 결정이 필요한 항목
+
+---
+
+## 의사결정 기록 (2026-04-22)
+
+### 연구 설계 지침(독창성 평가 반영) 반영 결정
+
+| 항목 | 결정 내용 |
+|---|---|
+| `friendly_pct` 공식 | **현행 유지** (largest + related + esop + treasury). `foundation_pct` 신규 컬럼 추가하되 합계 불변. KCMI 비교 컬럼 나란히 제공 |
+| LCA 구현 방법 | **옵션 B: `stepmix` 패키지** 사용 (diagonal covariance, local independence 가정) |
+| `esop_pct` 처리 | `related_pct`에서 분리 유지 + `friendly_pct`에 포함 유지 (KCMI 24-20 호환) |
+| `foundation_pct` | ownership_raw.csv의 `relate="공익법인"` 행에서 추출 (추가 API 호출 0건) |
+| H4 클러스터링 | GMM(메인) + Ward + LCA(stepmix) 3종 병행, ARI 교차 검증 행렬 |
+| H4 전처리 | 소유지분율 **로짓 변환** (0.5/99.5% 윈저라이징 후) → StandardScaler |
+| K 범위 | **3~8** (기존 2~6에서 확장) |
+| Markov 시기 분할 | 전체 / 2015–2023 / 2024 (자사주 규제 전후) |
+| Functional Clustering + HMM | Phase B (4/28 이후, `scikit-fda` + `hmmlearn`) |
+| RESEARCH_PLAN.md §10 독창성 | "최초/가장 긴 시계열" 주장 삭제 → KCMI 24-20 확장·운용화로 재포지셔닝 |
+| RESEARCH_PLAN.md §2.1 | `trmend_rate` 없음 주장 ❌ 삭제 (DART 실제 제공 확인, 수집 완료) |
 
 ---
 

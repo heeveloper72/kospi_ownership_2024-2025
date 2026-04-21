@@ -65,7 +65,11 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
         )
         esop_pct = grp.loc[mask_esop, "stock_rate_f"].sum() if mask_esop.any() else 0.0
 
-        # 특수관계인: 본인도 우리사주도 아닌 나머지
+        # 공익법인: relate에 "공익법인" 포함 (H3 합성 우호지분 지수용 — related_pct 내 서브컴포넌트)
+        mask_foundation = grp["relate_clean"].str.contains("공익법인", na=False)
+        foundation_pct = grp.loc[mask_foundation, "stock_rate_f"].sum() if mask_foundation.any() else 0.0
+
+        # 특수관계인: 본인도 우리사주도 아닌 나머지 (공익법인 포함 — 현행 유지)
         mask_related = ~mask_self & ~mask_esop
         related_pct = grp.loc[mask_related, "stock_rate_f"].sum() if mask_related.any() else 0.0
 
@@ -75,8 +79,9 @@ def process_ownership(df_own: pd.DataFrame) -> pd.DataFrame:
             "market": market,
             "year": year,
             "largest_pct": largest_pct,
-            "related_pct": related_pct,
+            "related_pct": related_pct,        # 공익법인 포함 (현행 유지)
             "esop_pct": esop_pct,
+            "foundation_pct": foundation_pct,  # related_pct의 서브컴포넌트 (H3용)
         })
 
     return pd.DataFrame(results)
@@ -273,6 +278,10 @@ def main() -> None:
 
     # 4. 우호지분 계산
     df_panel["treasury_pct"] = df_panel["treasury_pct"].fillna(0)
+    df_panel["foundation_pct"] = df_panel["foundation_pct"].fillna(0)
+
+    # friendly_pct (현행): largest + related(공익법인 포함) + esop + treasury
+    # → KCMI 24-20 정의와 동일 (비교 가능), related_pct 내 공익법인 이중 계산 없음
     df_panel["friendly_pct"] = (
         df_panel["largest_pct"]
         + df_panel["related_pct"]
@@ -280,6 +289,10 @@ def main() -> None:
         + df_panel["esop_pct"]
     )
     df_panel["voting_friendly_pct"] = df_panel["friendly_pct"] - df_panel["treasury_pct"]
+
+    # KCMI 벤치마크 비교 컬럼 (2023년말 기준 고정값)
+    KCMI_BENCHMARK = {"전체": 43.07, "KOSPI": 49.34, "KOSDAQ": 39.93}
+    df_panel["kcmi_friendly_benchmark"] = df_panel["market"].map(KCMI_BENCHMARK)
 
     # 5. 저장
     out_path = DATA_PROCESSED / "ownership_panel.csv"

@@ -80,10 +80,12 @@ item.get("stock_rate", "")  →  ""  →  parse_rate("") = NaN
 | 주식종류 | `stock_knd` | `stock_knd` | ✅ 정상 |
 | 기초수량 | `bsis_qy` | `bsis_qy` | ✅ 정상 |
 | 기말수량 | `trmend_qy` | `trmend_qy` | ✅ 정상 |
-| **기말비율** | `trmend_rate` | **(없음)** | ❌ **API에 비율 필드 자체가 없음** |
+| **기말비율** | `trmend_rate` | `trmend_rate` | ✅ **정상 — DART 실제 제공 확인** |
 
-> **중요:** `tesstkAcqsDspsSttus`는 비율(%)을 반환하지 않는다.
-> 기말수량(`trmend_qy`) ÷ 총발행주식수(`stockTotqySttus.istc_totqy`)로 직접 계산해야 한다.
+> **[2026-04-21 정정]** 기존 이 문서는 `trmend_rate`가 API에 없다고 기술했으나,
+> DART OpenAPI 공식 가이드 및 실제 수집 결과 `trmend_rate`(기말소유비율)은 정상 제공됨.
+> `03_collect_treasury.py`와 카나리아 스크립트는 이미 수정 완료.
+> 1순위: `trmend_rate` (DART 직접 계산값), 2순위: `trmend_qy` / `total_shares`.
 
 #### mrhlSttus (소액주주현황) 필드명 대조
 
@@ -132,26 +134,28 @@ item.get("stock_rate", "")  →  ""  →  parse_rate("") = NaN
 CSV 컬럼명(`stock_cnt`, `stock_rate`)은 내부 별칭으로 유지해도 무방하다.
 오직 `.get()` 키만 변경하면 된다.
 
-### 3.2 `src/03_collect_treasury.py` — 비율 계산 방식 변경
+### 3.2 `src/03_collect_treasury.py` — 비율 수집 전략 (2026-04-21 정정)
 
-기존 `trmend_rate` 수집 → 제거.  
-신규: `trmend_qy` + `stockTotqySttus` API로 총발행주식수를 별도 수집 후 비율 계산.
+> **[정정]** 기존 계획(trmend_rate 제거, 수량 기반 계산)에서 변경됨.
+
+DART `trmend_rate`가 실제 제공되므로 1순위로 사용한다.
 
 ```python
-# 추가 수집 필드 (tesstkAcqsDspsSttus 응답)
+# 현행 수집 필드 (tesstkAcqsDspsSttus 응답) — 모두 정상 수집 중
+"stock_knd":    item.get("stock_knd", ""),
 "acqs_mth1":    item.get("acqs_mth1", ""),
 "acqs_mth2":    item.get("acqs_mth2", ""),
 "acqs_mth3":    item.get("acqs_mth3", ""),
 "bsis_qy":      item.get("bsis_qy", ""),
-"trmend_qy":    item.get("trmend_qy", ""),   # 기말 보유수량
-# trmend_rate 수집 제거
+"trmend_qy":    item.get("trmend_qy", ""),
+"trmend_rate":  item.get("trmend_rate", ""),  # ✅ 1순위 — DART 직접 계산값
 
-# Step 5(clean_merge)에서 계산:
-# treasury_pct = trmend_qy / total_issued_shares * 100
+# Step 5(clean_merge)에서:
+# treasury_pct 1순위: trmend_rate
+# treasury_pct 2순위: trmend_qy / total_issued_shares (stockTotqySttus)
 ```
 
-총발행주식수 출처: `stockTotqySttus` API (corp_code, bsns_year, reprt_code로 조회)  
-→ 별도 `src/03b_collect_total_shares.py`로 수집하거나 03과 통합.
+`03b_collect_total_shares.py`: 2순위 폴백용으로 유지.
 
 ### 3.3 테스트 픽스처 교체
 
@@ -459,17 +463,32 @@ UMAP(2D)은 시각화 전용 — 실제 클러스터링은 PCA 공간에서 수�
 
 ---
 
-## 10. 독창성 및 학술 기여
+## 10. 독창성 및 학술 기여 (2026-04-22 재포지셔닝)
 
-1. **가장 긴 시계열:** 2015~2025년 11년 패널 — 기존 문헌(1~5년)을 크게 상회
-2. **2014 순환출자 금지를 활용한 자연실험:** 사후 데이터 10년이 축적된 지금이 첫 번째 분석 적기. 피어리뷰 문헌에 활용된 사례 없음
-3. **2024 자본시장법 자사주 규제 효과:** 시행 직후라 전 세계 미발표. 예비적 결과만으로도 기여
-4. **전체 상장사 비지도 클러스터링:** ISS·KCGS 등 기존 지배구조 데이터는 대형사 중심. 전체 2,400개사를 대상으로 데이터 기반 유형 분류는 최초
-5. **클러스터 경로의존성 검증(H4):** 지배구조를 구조 변수로 쓸 수 있는지 방법론적으로 검증
+> **[중요 정정]** KCMI 이슈보고서 24-20(이성복, 2024)이 이미 전체 상장사 2,407개사 ×
+> 12개년(2012–2023) 동일 변수 패널을 구축하였음. "최초/가장 긴 시계열" 주장은 사실과 다름.
+> 아래 독창성 주장으로 전면 대체.
 
-> **포지셔닝:** 이 연구는 (1) 11년 행정 패널 구축, (2) 2014 규제를 준자연실험으로 활용,
-> (3) 2024 규제의 첫 실증 분석, (4) 전체 상장 유니버스 GMM 클러스터링을 결합한다.
-> 국문 정책 보고서 및 영문 동아시아 지배구조 문헌 모두에서 독창적 기여를 갖는다.
+### 독창성 우선순위 (4→1 순)
+
+1. **(최우선) 2024년 12월 자사주 규제의 전 세계 최초 실증 분석 (H2, H5)**
+   - 2024-12-31 시행 → 2025 데이터로 최초 분석 가능. 예비적 결과만으로도 기여.
+2. **(핵심) 전체 상장 유니버스 GMM + Markov 전이로 Bebchuk-Roe 경로의존성 최초 직접 검증 (H4)**
+   - 동아시아 지배구조 경로의존성을 정량 검증한 선행연구 전무.
+3. **(부차) 2014년 순환출자 금지의 IPO 코호트 설계 효과 (H1)**
+4. **(기반) DART OpenAPI 기반 재현 가능 파이프라인 — KCMI 24-20 시간적 확장·운용화**
+
+### 적절한 포지셔닝 표현
+
+- "KCMI 24-20의 기술적(descriptive) 패널을 2024–2025년까지 확장하고"
+- "DART OpenAPI 직접 수집 기반의 재현 가능한(reproducible) 파이프라인을 구축하며"
+- "KCMI가 명시적으로 범위 밖으로 표시한 인과 추론(causal inference) 프레임을 제공한다"
+
+### 논문 한계 섹션 필수 기재
+
+- 패널 자체는 KCMI 24-20과 상당 부분 중복
+- H2 사후 관찰 기간 1개년(2025) → "예비적 결과"로 명시
+- H3 지배권-현금흐름 괴리 → 가치 할인 관계는 기확립된 결과
 
 ---
 
