@@ -20,6 +20,12 @@ API 인증키 발급:
 일일 한도: 10,000건/일 (openapi.krx.co.kr 정책, DART 카운터와 독립)
 응답 포맷: JSON, 키 "OutBlock_1" 아래 list
 엔드포인트: https://data-dbg.krx.co.kr/svc/apis/
+인증 방식: HTTP 헤더 `AUTH_KEY: <key>` (URL 쿼리 파라미터 아님)
+
+401 Unauthorized 시 점검 순서:
+  1) 키에 개행/공백 섞였는지 (코드에서 strip 적용 중)
+  2) KRX 마이페이지 > API 서비스 신청에서 주식(sto) 카테고리 이용신청 승인 여부
+  3) 이용신청 승인까지 최대 1영업일 소요
 """
 
 import logging
@@ -67,15 +73,19 @@ ENDPOINTS = [
 
 
 def _check_krx_credentials() -> str:
-    """KRX_AUTH_KEY 환경변수 확인. 없으면 명확한 오류 메시지로 종료."""
+    """KRX_AUTH_KEY 환경변수 확인. 없으면 명확한 오류 메시지로 종료.
+
+    복사 붙여넣기 과정에서 섞이는 개행·공백을 strip() 으로 제거.
+    """
     load_dotenv(BASE_DIR / ".env")
-    key = os.environ.get("KRX_AUTH_KEY")
+    key = os.environ.get("KRX_AUTH_KEY", "").strip()
     if not key:
         raise RuntimeError(
             "KRX_AUTH_KEY 환경변수 미설정\n"
             "  로컬: .env 에 KRX_AUTH_KEY=... 추가\n"
             "  CI  : GitHub Settings → Secrets → KRX_AUTH_KEY 등록\n"
-            "  발급: https://openapi.krx.co.kr (마이페이지 > API 인증키 신청)"
+            "  발급: https://openapi.krx.co.kr (마이페이지 > API 인증키 신청)\n"
+            "  추가 필수: 마이페이지 > API 서비스 신청 → 주식(sto) 카테고리 이용신청 승인"
         )
     return key
 
@@ -91,11 +101,22 @@ def _parse_number(val: object) -> int | str:
 
 
 def call_krx_api(endpoint: str, auth_key: str, params: dict) -> list[dict]:
-    """KRX OpenAPI 단건 호출. OutBlock_1 리스트 반환."""
+    """KRX OpenAPI 단건 호출. OutBlock_1 리스트 반환.
+
+    인증: AUTH_KEY를 HTTP 헤더로 전달 (URL 쿼리 파라미터 아님).
+    401 응답 시: 키 자체가 아니라 서비스 이용신청 미승인 가능성 높음.
+    """
     url = f"{KRX_API_BASE}/{endpoint}"
-    full_params = {"AUTH_KEY": auth_key, **params}
+    headers = {"AUTH_KEY": auth_key}
     try:
-        resp = requests.get(url, params=full_params, timeout=30)
+        resp = requests.get(url, params=params, headers=headers, timeout=30)
+        if resp.status_code == 401:
+            logger.error(
+                f"[KRX] 401 Unauthorized ({endpoint}) — "
+                "AUTH_KEY 유효성 또는 서비스 이용신청 승인 상태 확인 필요. "
+                "KRX 마이페이지 > API 서비스 신청 > 주식(sto) 카테고리 승인 여부 점검."
+            )
+            return []
         resp.raise_for_status()
         data = resp.json()
         result = data.get("OutBlock_1", [])
@@ -115,21 +136,45 @@ def find_last_trading_day(year: int, auth_key: str) -> str:
     """해당 연도의 마지막 거래일을 YYYYMMDD로 반환.
 
     12/31부터 역순으로 최대 15일 탐색. KOSPI 엔드포인트 응답이 비면 휴장으로 판단.
+    401 응답이 반복되면 인증 문제로 간주하고 즉시 중단 (휴장 재시도 무의미).
     """
     today = date.today()
     candidate = date(year, 12, 31)
     if candidate > today:
         candidate = today
 
+    consecutive_empty = 0
     for _ in range(15):
         dt_str = candidate.strftime("%Y%m%d")
-        rows = call_krx_api("sto/stk_bydd_trd", auth_key, {"basDd": dt_str})
-        if rows:
-            return dt_str
+        # 사전 검증: 첫 시도에서 401 나오면 인증 문제 — 빨리 중단
+        url = f"{KRX_API_BASE}/sto/stk_bydd_trd"
+        try:
+            pre = requests.get(
+                url, params={"basDd": dt_str},
+                headers={"AUTH_KEY": auth_key}, timeout=30,
+            )
+            if pre.status_code == 401:
+                raise RuntimeError(
+                    f"KRX 401 Unauthorized (basDd={dt_str}). "
+                    "AUTH_KEY 유효성 또는 서비스 이용신청 승인 상태 확인 필요. "
+                    "마이페이지 > API 서비스 신청 > 주식(sto) 카테고리 승인 여부 점검."
+                )
+            if pre.status_code == 200:
+                rows = pre.json().get("OutBlock_1", []) or []
+                if rows:
+                    return dt_str
+                consecutive_empty += 1
+        except requests.RequestException as e:
+            logger.warning(f"[KRX] 거래일 탐색 중 오류 ({dt_str}): {e}")
+
         candidate -= timedelta(days=1)
         time.sleep(FIND_TRADING_DAY_SLEEP)
 
-    raise RuntimeError(f"{year}년 마지막 거래일을 찾지 못했습니다 (15일 탐색 실패)")
+    raise RuntimeError(
+        f"{year}년 마지막 거래일을 찾지 못했습니다 (15일 탐색 실패, "
+        f"연속 빈 응답 {consecutive_empty}회). "
+        "엔드포인트 또는 basDd 파라미터 형식 확인 필요."
+    )
 
 
 def collect_year(year: int, corps: pd.DataFrame, auth_key: str) -> int:

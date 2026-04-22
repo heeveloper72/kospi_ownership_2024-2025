@@ -18,7 +18,9 @@ Python 3.10+ / requests / pandas / matplotlib, plotly / python-dotenv
 |--------|---------|------|---------|-------------------|
 | DART OpenAPI | `DART_API_KEY` | Step 2~4, 8 수집 | https://opendart.fss.or.kr | `DART_API_KEY` |
 | KRX OpenAPI | `KRX_AUTH_KEY` | Step 9 시가총액 | https://openapi.krx.co.kr (무료, 이메일 1일 승인) | `KRX_AUTH_KEY` |
-> KRX API 실제 호출 host: `data-dbg.krx.co.kr/svc/apis/` (AUTH_KEY를 URL 쿼리 파라미터로 전달)
+> KRX API 실제 호출 host: `data-dbg.krx.co.kr/svc/apis/` ("dbg"는 debug 아닌 내부 네이밍 — 프로덕션).
+> **인증**: `AUTH_KEY`를 HTTP **헤더**로 전달 (URL 쿼리 파라미터 아님).
+> **필수 사전조치**: 키 발급과 별도로 마이페이지 > API 서비스 신청에서 **주식(sto) 카테고리 이용신청 승인** 필요 (최대 1영업일).
 
 > **개발 원칙**: 새 외부 API/라이브러리 도입 시 크리덴셜·레이트리밋·인증방식을 이 표에 먼저 추가하고, `.env.example`에도 항목 추가 후 코드 작성.
 
