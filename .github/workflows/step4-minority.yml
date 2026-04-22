@@ -232,6 +232,10 @@ jobs:
             echo "Step 5 워크플로우 트리거 중..."
             gh workflow run step5-clean-merge.yml --ref "${{ github.ref_name }}"
             echo "✅ Step 5 트리거 완료 — 수집 파이프라인 완료, 정제/분석 시작"
+
+            echo "Step 8 워크플로우 트리거 중 (재무데이터 수집, DART 한도 독립)..."
+            gh workflow run step8-financial.yml --ref "${{ github.ref_name }}"
+            echo "✅ Step 8 트리거 완료 — Step 5/8 병렬 진행"
           fi
 
       - name: Summary

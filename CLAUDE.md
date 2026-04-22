@@ -17,9 +17,55 @@ Python 3.10+ / requests / pandas / matplotlib, plotly / python-dotenv
 | 서비스 | 환경변수 | 용도 | 가입 URL | GitHub Secret 이름 |
 |--------|---------|------|---------|-------------------|
 | DART OpenAPI | `DART_API_KEY` | Step 2~4, 8 수집 | https://opendart.fss.or.kr | `DART_API_KEY` |
-| KRX 정보데이터시스템 | `KRX_ID`, `KRX_PW` | Step 9 시가총액 (pykrx) | https://data.krx.co.kr (무료) | `KRX_ID`, `KRX_PW` |
+| KRX OpenAPI | `KRX_AUTH_KEY` | Step 9 시가총액 | https://openapi.krx.co.kr (무료, 이메일 승인) | `KRX_AUTH_KEY` |
 
 > **개발 원칙**: 새 외부 API/라이브러리 도입 시 크리덴셜·레이트리밋·인증방식을 이 표에 먼저 추가하고, `.env.example`에도 항목 추가 후 코드 작성.
+
+## API 필드 매핑 검증표 (API 원본 → 우리 컬럼명)
+
+### Step 2: DART `hyslrSttus` → `ownership_raw.csv` ✅ 검증완료
+| DART API 필드 | 우리 컬럼명 | 설명 |
+|---|---|---|
+| `nm` | `nm` | 주주명 |
+| `relate` | `relate` | 관계(본인/특수관계인 등) |
+| `trmend_posesn_stock_co` | `stock_cnt` | 기말소유주식수 |
+| `trmend_posesn_stock_qota_rt` | `stock_rate` | 기말소유지분율(%) |
+
+### Step 3: DART `tesstkAcqsDspsSttus` → `treasury_raw.csv` ✅ 검증완료
+| DART API 필드 | 우리 컬럼명 | 설명 |
+|---|---|---|
+| `stock_knd` | `stock_knd` | 주식종류 |
+| `acqs_mth1` / `acqs_mth2` / `acqs_mth3` | 동일 | 취득방법 |
+| `bsis_qy` | `bsis_qy` | 기초수량 |
+| `change_qy` | `change_qy` | 변동수량 |
+| `trmend_qy` | `trmend_qy` | 기말수량 |
+| `trmend_rate` | `trmend_rate` | 기말소유비율(%) — treasury_pct 1순위 |
+
+### Step 4: DART `mrhlSttus` → `minority_raw.csv` ✅ 검증완료
+| DART API 필드 | 우리 컬럼명 | 설명 |
+|---|---|---|
+| `se` | `se` | 구분(소액주주 등) |
+| `shrholdr_co` | `shrholdr_co` | 주주수 |
+| `shrholdr_tot_co` | `shrholdr_tot_co` | 전체주주수 |
+| `shrholdr_rate` | `shrholdr_rate` | 주주비율(%) |
+| `hold_stock_co` | `hold_stock_co` | 보유주식수 |
+| `stock_tot_co` | `stock_tot_co` | 총발행주식수 |
+| `hold_stock_rate` | `hold_stock_rate` | 소유지분율(%) |
+
+### Step 8: DART `fnlttSinglAcntAll` → `financial_raw.csv` ✅ 검증완료
+| DART API 필드 | 우리 컬럼명 | 매핑 로직 |
+|---|---|---|
+| `account_nm == "자산총계"` | `total_assets` | account_nm 텍스트 매칭 |
+| `account_nm == "부채총계"` | `total_liabilities` | account_nm 텍스트 매칭 |
+| `account_nm == "자본총계"` | `total_equity` | account_nm 텍스트 매칭 |
+| `account_nm ∈ {매출액, 수익(매출액), 영업수익, 매출}` | `revenue` | account_nm 텍스트 매칭 |
+| `account_nm ∈ {영업이익, 영업이익(손실)}` | `operating_income` | account_nm 텍스트 매칭 |
+| `thstrm_amount` | 위 5개 컬럼 공통 값 소스 | 당기 금액(원, 문자열) |
+| `fs_div` | `fs_div_used` | CFS/OFS 구분 기록 |
+
+### Step 9: KRX OpenAPI → `market_cap_raw.csv` ⚠️ 검증 대기 중
+> KRX OpenAPI 실제 응답 필드명은 에이전트 조사 결과 반영 예정.
+> 현재 임시 컬럼: `market_cap` (시가총액), `shares` (상장주식수), `snapshot_date` (거래일)
 
 ## 데이터 정의
 - 최대주주 지분율(`largest_pct`): hyslrSttus API, `relate ∈ {본인, 최대주주, 최대주주 본인}` 또는 "본인" 포함 행

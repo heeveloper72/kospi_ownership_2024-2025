@@ -53,7 +53,10 @@ jobs:
           unzip -o /tmp/step1.zip -d data/raw/
 
       # ── 일일 예산 충돌 확인: Step 3 완료 전 실행 방지 ─────────────────────
-      - name: Check Step 3 completion (blocking)
+      # step4 자동 트리거 시에는 Step 3이 이미 완료됐으므로 항상 통과.
+      # 수동 실행 실수 방어: 미완료 시 skip(exit 0) + 경고 출력.
+      - name: Check Step 3 completion
+        id: step3_check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -62,7 +65,8 @@ jobs:
             --jq '.artifacts[0].id // empty')
 
           if [ -z "$ARTIFACT_ID" ]; then
-            echo "::warning::Step 3 아티팩트 없음. 수동 실행으로 간주하고 계속합니다."
+            echo "::warning::Step 3 아티팩트 없음 — 첫 수동 실행으로 간주하고 진행합니다."
+            echo "step3_done=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -71,7 +75,7 @@ jobs:
           unzip -o /tmp/step3_check.zip -d /tmp/step3_check/
 
           python - <<'PYEOF'
-          import json, sys
+          import json, sys, os
           from pathlib import Path
 
           corps_path = Path("data/raw/listed_corps.csv")
@@ -86,15 +90,19 @@ jobs:
           done_s = check_cp("/tmp/step3_check/total_shares_checkpoint.json")
           both_done = (done_t >= total) and (done_s >= total)
 
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"step3_done={'true' if both_done else 'false'}\n")
+
           if not both_done:
-              print(f"::error::Step 3 미완료 (03: {done_t:,}/{total:,}, 03b: {done_s:,}/{total:,}). Step 8 실행 시 일일 예산 충돌 발생.")
-              sys.exit(1)
+              print(f"::warning::Step 3 미완료 (03: {done_t:,}/{total:,}, 03b: {done_s:,}/{total:,}).")
+              print("Step 4 완료 시 자동 트리거됩니다. 지금은 스킵합니다.")
           else:
-              print(f"✅ Step 3 완료 확인 — Step 8 착수 가능")
+              print(f"✅ Step 3 완료 확인 ({done_t:,}/{total:,}) — Step 8 착수 가능")
           PYEOF
 
       # ── 공유 일일 카운터 복원 ────────────────────────────────────────────
       - name: Restore shared daily counter from Step 3
+        if: steps.step3_check.outputs.step3_done == 'true'
         run: |
           COUNTER_FILE="/tmp/step3_check/.api_daily_counter.json"
           if [ ! -f "$COUNTER_FILE" ]; then
@@ -149,7 +157,7 @@ jobs:
           echo "✅ 초기화 완료 — 전체 재수집 시작"
 
       - name: Restore previous financial data (일반 실행)
-        if: github.event_name != 'workflow_dispatch' || inputs.force_reset != true
+        if: steps.step3_check.outputs.step3_done == 'true' && (github.event_name != 'workflow_dispatch' || inputs.force_reset != true)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -167,6 +175,7 @@ jobs:
       # ── Step 8 이미 완료됐는지 확인 ──────────────────────────────────────
       - name: Check if Step 8 already complete
         id: pre_check
+        if: steps.step3_check.outputs.step3_done == 'true'
         run: |
           python - <<'PYEOF'
           import json
@@ -195,7 +204,7 @@ jobs:
           echo "already_done=$(cat /tmp/step8_already_done)" >> $GITHUB_OUTPUT
 
       - name: Run Step 8 (미완료 시에만)
-        if: steps.pre_check.outputs.already_done == 'false'
+        if: steps.step3_check.outputs.step3_done == 'true' && steps.pre_check.outputs.already_done == 'false'
         run: python src/08_collect_financial.py
 
       - name: Upload artifact
