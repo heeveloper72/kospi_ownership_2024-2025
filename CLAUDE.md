@@ -17,7 +17,8 @@ Python 3.10+ / requests / pandas / matplotlib, plotly / python-dotenv
 | 서비스 | 환경변수 | 용도 | 가입 URL | GitHub Secret 이름 |
 |--------|---------|------|---------|-------------------|
 | DART OpenAPI | `DART_API_KEY` | Step 2~4, 8 수집 | https://opendart.fss.or.kr | `DART_API_KEY` |
-| KRX OpenAPI | `KRX_AUTH_KEY` | Step 9 시가총액 | https://openapi.krx.co.kr (무료, 이메일 승인) | `KRX_AUTH_KEY` |
+| KRX OpenAPI | `KRX_AUTH_KEY` | Step 9 시가총액 | https://openapi.krx.co.kr (무료, 이메일 1일 승인) | `KRX_AUTH_KEY` |
+> KRX API 실제 호출 host: `data-dbg.krx.co.kr/svc/apis/` (AUTH_KEY를 URL 쿼리 파라미터로 전달)
 
 > **개발 원칙**: 새 외부 API/라이브러리 도입 시 크리덴셜·레이트리밋·인증방식을 이 표에 먼저 추가하고, `.env.example`에도 항목 추가 후 코드 작성.
 
@@ -63,9 +64,15 @@ Python 3.10+ / requests / pandas / matplotlib, plotly / python-dotenv
 | `thstrm_amount` | 위 5개 컬럼 공통 값 소스 | 당기 금액(원, 문자열) |
 | `fs_div` | `fs_div_used` | CFS/OFS 구분 기록 |
 
-### Step 9: KRX OpenAPI → `market_cap_raw.csv` ⚠️ 검증 대기 중
-> KRX OpenAPI 실제 응답 필드명은 에이전트 조사 결과 반영 예정.
-> 현재 임시 컬럼: `market_cap` (시가총액), `shares` (상장주식수), `snapshot_date` (거래일)
+### Step 9: KRX OpenAPI → `market_cap_raw.csv` ✅ 필드명 확인 완료
+| KRX API 응답 필드 | 우리 컬럼명 | 설명 |
+|---|---|---|
+| `ISU_SRT_CD` | `stock_code` | 6자리 단축 종목코드 |
+| `MKTCAP` | `market_cap` | 시가총액(원, 콤마 제거 후 int) |
+| `LIST_SHRS` | `shares` | 상장주식수 |
+| (파라미터 `basDd`) | `snapshot_date` | 연말 마지막 거래일 YYYYMMDD |
+| KOSPI: `sto/stk_bydd_trd` / KOSDAQ: `sto/ksq_bydd_trd` | `market` | 시장 구분 |
+> 응답 JSON 최상위 키: `OutBlock_1` (list). 일일 한도: 10,000건 (DART 카운터와 **독립**).
 
 ## 데이터 정의
 - 최대주주 지분율(`largest_pct`): hyslrSttus API, `relate ∈ {본인, 최대주주, 최대주주 본인}` 또는 "본인" 포함 행
