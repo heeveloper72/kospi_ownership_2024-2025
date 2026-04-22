@@ -1,0 +1,138 @@
+name: "Step 9 — KRX 시가총액 수집 (H3 Tobin Q)"
+
+# pykrx는 KRX 공개 데이터를 사용하므로 DART 일일 10,000 한도와 무관.
+# Step 3 수집 중에도 병렬 실행 가능 (충돌 없음).
+on:
+  workflow_dispatch:
+    inputs:
+      force_reset:
+        description: "기존 market_cap 데이터 삭제 후 전체 재수집"
+        type: boolean
+        default: false
+  schedule:
+    # 매주 월요일 UTC 04:00 (한국 13:00) — DART 수집 스텝과 시간대 분리
+    - cron: "0 4 * * 1"
+
+concurrency:
+  group: step9-market-cap
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Download Step 1 artifact (listed_corps.csv)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/raw
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1-corp-list&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Step 1 아티팩트가 없습니다."
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
+          unzip -o /tmp/step1.zip -d data/raw/
+
+      # ── force_reset 시 기존 데이터 백업 후 초기화 ───────────────────────
+      - name: Backup existing market_cap data before force_reset
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/backup_data
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step9-market-cap-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "기존 market_cap 데이터 백업 다운로드 (id=$ARTIFACT_ID)..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup.zip
+            unzip -o /tmp/backup.zip -d /tmp/backup_data/
+            echo "✅ 백업 다운로드 완료"
+          else
+            echo "백업할 기존 데이터 없음"
+          fi
+
+      - name: Upload backup artifact (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: step9-market-cap-data-backup-${{ github.run_id }}
+          path: /tmp/backup_data/
+          retention-days: 30
+
+      - name: Reset market_cap checkpoint (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        run: |
+          echo "⚠️  force_reset=true — 체크포인트 초기화 및 CSV 삭제"
+          echo '{"completed": {}}' > data/raw/market_cap_checkpoint.json
+          rm -f data/raw/market_cap_raw.csv
+          echo "✅ 초기화 완료 — 전체 재수집 시작"
+
+      - name: Restore previous market_cap data (일반 실행)
+        if: github.event_name != 'workflow_dispatch' || inputs.force_reset != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step9-market-cap-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            echo "이전 market_cap 데이터 복원 중..."
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step9.zip
+            unzip -o /tmp/step9.zip -d data/raw/
+          else
+            echo "첫 실행"
+          fi
+
+      - name: Run Step 9
+        run: python src/09_collect_market_cap.py
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step9-market-cap-data
+          path: |
+            data/raw/market_cap_raw.csv
+            data/raw/market_cap_checkpoint.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os, subprocess
+          summary = []
+          try:
+              cp = json.load(open("data/raw/market_cap_checkpoint.json"))
+              years = cp.get("completed", {}).get("_ALL", [])
+              summary.append(f"완료 연도: **{len(years)}/11**  ({', '.join(sorted(years))})")
+          except: pass
+          try:
+              rows = int(subprocess.check_output(
+                  ["wc", "-l", "data/raw/market_cap_raw.csv"]
+              ).split()[0]) - 1
+              summary.append(f"수집 행수: **{rows:,}행**")
+          except: pass
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("## Step 9 결과 (KRX 시가총액)\n")
+              for s in summary:
+                  f.write(f"- {s}\n")
+          EOF
