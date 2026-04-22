@@ -12,6 +12,15 @@ DART 공시 기반으로 전체 상장사 ~2,400개의 최대주주 지분율·�
 ## 기술 스택
 Python 3.10+ / requests / pandas / matplotlib, plotly / python-dotenv
 
+## 외부 크리덴셜 요건 (신규 의존성 추가 시 여기에 먼저 문서화)
+
+| 서비스 | 환경변수 | 용도 | 가입 URL | GitHub Secret 이름 |
+|--------|---------|------|---------|-------------------|
+| DART OpenAPI | `DART_API_KEY` | Step 2~4, 8 수집 | https://opendart.fss.or.kr | `DART_API_KEY` |
+| KRX 정보데이터시스템 | `KRX_ID`, `KRX_PW` | Step 9 시가총액 (pykrx) | https://data.krx.co.kr (무료) | `KRX_ID`, `KRX_PW` |
+
+> **개발 원칙**: 새 외부 API/라이브러리 도입 시 크리덴셜·레이트리밋·인증방식을 이 표에 먼저 추가하고, `.env.example`에도 항목 추가 후 코드 작성.
+
 ## 데이터 정의
 - 최대주주 지분율(`largest_pct`): hyslrSttus API, `relate ∈ {본인, 최대주주, 최대주주 본인}` 또는 "본인" 포함 행
 - 특수관계인 합산(`related_pct`): 동 API, 본인·우리사주 제외한 나머지 행 합계

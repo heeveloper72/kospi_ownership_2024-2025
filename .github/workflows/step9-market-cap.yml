@@ -101,6 +101,9 @@ jobs:
           fi
 
       - name: Run Step 9
+        env:
+          KRX_ID: ${{ secrets.KRX_ID }}
+          KRX_PW: ${{ secrets.KRX_PW }}
         run: python src/09_collect_market_cap.py
 
       - name: Upload artifact

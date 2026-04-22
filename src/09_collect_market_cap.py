@@ -5,9 +5,16 @@ pykrx로 연도별 전체 상장 종목의 연말 종가 기준 시가총액을 
 DART API와 별도 경로이므로 DART 일일 한도와 무관.
 
 연도별 1회 호출(전체 종목 일괄 수신) → 2015~2025 총 11회 API 호출.
+
+사전 요건 (KRX 계정):
+  KRX_ID  — KRX 정보데이터시스템(data.krx.co.kr) 회원 아이디
+  KRX_PW  — 해당 계정 비밀번호
+  로컬 실행: .env에 추가 또는 shell에서 export
+  CI 실행: GitHub Secrets KRX_ID / KRX_PW 등록 후 workflow env 주입
 """
 
 import logging
+import os
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -96,7 +103,21 @@ def collect_year(year: int, corps: pd.DataFrame) -> int:
     return len(rows)
 
 
+def _check_krx_credentials() -> None:
+    """KRX_ID / KRX_PW 환경변수 존재 확인. 없으면 명확한 오류 메시지로 종료."""
+    missing = [v for v in ("KRX_ID", "KRX_PW") if not os.environ.get(v)]
+    if missing:
+        raise RuntimeError(
+            f"KRX 인증 환경변수 미설정: {', '.join(missing)}\n"
+            "  로컬: .env 파일에 KRX_ID=... / KRX_PW=... 추가 후 재실행\n"
+            "  CI  : GitHub Settings → Secrets → KRX_ID / KRX_PW 등록,\n"
+            "         workflow env 블록에 주입 확인 (step9-market-cap.yml)\n"
+            "  KRX 가입: https://data.krx.co.kr (무료 회원가입)"
+        )
+
+
 def main() -> None:
+    _check_krx_credentials()
     DATA_RAW.mkdir(parents=True, exist_ok=True)
 
     corps_path = DATA_RAW / "listed_corps.csv"
