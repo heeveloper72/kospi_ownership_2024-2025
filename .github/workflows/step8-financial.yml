@@ -219,6 +219,39 @@ jobs:
           retention-days: 90
           overwrite: true
 
+      # ── Step 8 완료 시 Step 1c 자동 트리거 ─────────────────────────────────
+      - name: Auto-trigger Step 1c if Step 8 complete
+        if: steps.step3_check.outputs.step3_done == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          cp_path = Path("data/raw/financial_checkpoint.json")
+          corps_path = Path("data/raw/listed_corps.csv")
+          if not cp_path.exists():
+              Path("/tmp/trigger_step1c").write_text("false")
+              exit()
+
+          cp = json.loads(cp_path.read_text())
+          done = sum(len(v) for v in cp.get("completed", {}).values())
+          total = (sum(1 for _ in open(corps_path)) - 1) * 11
+
+          if done >= total:
+              Path("/tmp/trigger_step1c").write_text("true")
+              print(f"✅ Step 8 완료 ({done:,}/{total:,}) → Step 1c 트리거 예정")
+          else:
+              Path("/tmp/trigger_step1c").write_text("false")
+              print(f"⏳ Step 8 미완료 ({done:,}/{total:,}) — 내일 재개")
+          PYEOF
+
+          if [ "$(cat /tmp/trigger_step1c)" = "true" ]; then
+            gh workflow run step1c-corp-details.yml --ref "${{ github.ref_name }}"
+            echo "✅ Step 1c(기업 상세정보) 트리거 완료 — Phase C 시작"
+          fi
+
       - name: Summary
         if: always()
         run: |

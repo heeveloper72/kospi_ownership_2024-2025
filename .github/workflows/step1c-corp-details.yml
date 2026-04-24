@@ -1,0 +1,203 @@
+name: "Step 1c — DART 기업 상세정보 수집 (설립일·업종·결산월)"
+
+# Phase C: H1/H5 보조 변수 수집
+# - DART company.json API, ~2,661건, <1일 소요
+# - Step 8(재무데이터) 완료 후 자동 트리거 (DART 한도 공유, 동시 실행 불가)
+on:
+  workflow_dispatch:
+    inputs:
+      force_reset:
+        description: "기존 corp_details 데이터 삭제 후 전체 재수집"
+        type: boolean
+        default: false
+
+concurrency:
+  group: step1c-corp-details
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Create .env
+        run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env
+
+      - name: Download Step 1 artifact (listed_corps.csv)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p data/raw
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1-corp-list&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "::error::Step 1 아티팩트가 없습니다."
+            exit 1
+          fi
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1.zip
+          unzip -o /tmp/step1.zip -d data/raw/
+
+      # ── 공유 일일 카운터 복원 (Step 8 완료 시 잔여 호출 수 이어받기) ─────────
+      - name: Restore shared daily counter from Step 8
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step8-financial-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -z "$ARTIFACT_ID" ]; then
+            echo "Step 8 아티팩트 없음 — 새 카운터로 시작"
+            exit 0
+          fi
+          mkdir -p /tmp/step8_data
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step8.zip
+          unzip -o /tmp/step8.zip -d /tmp/step8_data/
+          COUNTER_FILE="/tmp/step8_data/.api_daily_counter.json"
+          if [ ! -f "$COUNTER_FILE" ]; then
+            echo "Step 8 카운터 없음"
+            exit 0
+          fi
+          COUNTER_DATE=$(python -c "import json; print(json.load(open('$COUNTER_FILE'))['date'])")
+          TODAY=$(date -u +%Y-%m-%d)
+          if [ "$COUNTER_DATE" = "$TODAY" ]; then
+            cp "$COUNTER_FILE" data/raw/.api_daily_counter.json
+            CALLS=$(python -c "import json; print(json.load(open('data/raw/.api_daily_counter.json'))['calls'])")
+            echo "✅ 카운터 복원: 오늘 이미 ${CALLS}/10,000 사용"
+          else
+            echo "⚠️  카운터 날짜 불일치 — 새 카운터 사용"
+          fi
+
+      # ── force_reset 시 기존 데이터 백업 후 초기화 ───────────────────────────
+      - name: Backup existing corp_details data before force_reset
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/backup_data
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1c-corp-details-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/backup.zip
+            unzip -o /tmp/backup.zip -d /tmp/backup_data/
+            echo "✅ 백업 완료"
+          else
+            echo "백업할 기존 데이터 없음"
+          fi
+
+      - name: Upload backup artifact (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: step1c-corp-details-data-backup-${{ github.run_id }}
+          path: /tmp/backup_data/
+          retention-days: 30
+
+      - name: Reset corp_details checkpoint (force_reset only)
+        if: github.event_name == 'workflow_dispatch' && inputs.force_reset == true
+        run: |
+          echo '{"completed": {}}' > data/raw/corp_details_checkpoint.json
+          rm -f data/raw/corp_details.csv
+          echo "✅ 초기화 완료"
+
+      - name: Restore previous corp_details data (일반 실행)
+        if: github.event_name != 'workflow_dispatch' || inputs.force_reset != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/artifacts?name=step1c-corp-details-data&per_page=1" \
+            --jq '.artifacts[0].id // empty')
+          if [ -n "$ARTIFACT_ID" ]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step1c.zip
+            unzip -o /tmp/step1c.zip -d data/raw/
+          else
+            echo "첫 실행"
+          fi
+
+      # ── 이미 완료됐는지 확인 ─────────────────────────────────────────────────
+      - name: Check if Step 1c already complete
+        id: pre_check
+        run: |
+          python - <<'PYEOF'
+          import json
+          from pathlib import Path
+
+          cp_path = Path("data/raw/corp_details_checkpoint.json")
+          corps_path = Path("data/raw/listed_corps.csv")
+
+          if not cp_path.exists():
+              Path("/tmp/step1c_done").write_text("false")
+              print("체크포인트 없음 — 처음부터 수집")
+              exit()
+
+          cp = json.loads(cp_path.read_text())
+          done = len(cp.get("completed", {}).get("_ALL", []))
+          total = sum(1 for _ in open(corps_path)) - 1
+
+          if done >= total:
+              print(f"✅ Step 1c 이미 완료 ({done:,}/{total:,}) — 스크립트 스킵")
+              Path("/tmp/step1c_done").write_text("true")
+          else:
+              print(f"⏳ 잔여 {total - done:,}건 — 수집 시작")
+              Path("/tmp/step1c_done").write_text("false")
+          PYEOF
+
+          echo "already_done=$(cat /tmp/step1c_done)" >> $GITHUB_OUTPUT
+
+      - name: Run Step 1c (미완료 시에만)
+        if: steps.pre_check.outputs.already_done == 'false'
+        run: python src/01c_get_corp_details.py
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step1c-corp-details-data
+          path: |
+            data/raw/corp_details.csv
+            data/raw/corp_details_checkpoint.json
+            data/raw/.api_daily_counter.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os
+          summary = []
+          try:
+              cp = json.load(open("data/raw/corp_details_checkpoint.json"))
+              done = len(cp.get("completed", {}).get("_ALL", []))
+              summary.append(f"완료: **{done:,}건**")
+          except: pass
+          try:
+              import subprocess
+              rows = int(subprocess.check_output(
+                  ["wc", "-l", "data/raw/corp_details.csv"]
+              ).split()[0]) - 1
+              summary.append(f"수집 행수: **{rows:,}행**")
+          except: pass
+          try:
+              ct = json.load(open("data/raw/.api_daily_counter.json"))
+              summary.append(f"오늘 API 호출: **{ct['calls']:,}/10,000**")
+          except: pass
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("## Step 1c 결과 (DART 기업 상세정보)\n")
+              for s in summary:
+                  f.write(f"- {s}\n")
+          EOF
