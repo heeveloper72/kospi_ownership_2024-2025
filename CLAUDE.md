@@ -282,3 +282,24 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 - `tests/fixtures/*.csv` 는 반드시 실제 DART API 응답 스냅샷 기반으로 작성
 - 코드 내부 컬럼명에 맞춘 수작업 가상 데이터 금지 (필드명 오류를 숨김)
 - 카나리아 검증 통과 후 첫 응답을 픽스처로 저장하는 워크플로 권장
+
+---
+
+## CI 감사 기록 (2026-04-24)
+
+### test.yml 지속 실패 — 근본 원인 분석 및 수정 완료
+
+| 항목 | 내용 |
+|---|---|
+| **실패 증상** | `ModuleNotFoundError: No module named 'sklearn'` (TestAnalyze 2건) |
+| **근본 원인** | `pykrx 1.2.4`가 `numpy<2.0` 제약 강제 → pip이 numpy 2.x→1.26.4로 다운그레이드 → scikit-learn 1.8.0 import 실패 |
+| **2차 원인** | pykrx는 Step 9 재작성(KRX OpenAPI 직접 호출) 이후 코드에서 미사용 — requirements.txt에만 잔존 |
+| **추가 버그** | 스모크 테스트 `if: ${{ secrets.X != '' }}` — GitHub Actions에서 secrets를 표현식에 직접 사용 불가 (보안 정책) |
+| **수정** | ① requirements.txt에서 `pykrx` 제거 ② `pip install --upgrade pip` 선행 추가 ③ 스모크 테스트 조건을 `env.DART_API_KEY != ''` 패턴으로 수정 |
+| **검증** | 로컬 `pytest tests/ -v`: **25/25 PASSED** |
+
+### 의존성 관리 원칙 (이번 이슈 반영)
+- **신규 외부 패키지 추가 시**: 기존 패키지와 numpy/scipy 버전 호환성 반드시 확인
+- **사용 중단된 패키지**: requirements.txt에서 즉시 제거 (잔존하면 버전 충돌 잠복)
+- **Heavy ML 패키지** (`hmmlearn`, `scikit-fda`): pip 설치 순서 및 네이티브 컴파일 의존성 주의
+- GitHub Actions secret 조건부 실행은 반드시 `env:` 블록 경유 패턴 사용
