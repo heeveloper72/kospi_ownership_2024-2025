@@ -5,7 +5,6 @@ plotly
 python-dotenv
 tqdm
 pytest
-pykrx
 scikit-learn
 lxml
 html5lib
