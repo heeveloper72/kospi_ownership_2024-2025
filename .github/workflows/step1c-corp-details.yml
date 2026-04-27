@@ -18,6 +18,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     permissions:
       contents: read
       actions: write
@@ -30,7 +31,11 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - run: pip install -r requirements.txt
+      # collection 스크립트는 경량 의존성만 필요.
+      - name: Install lightweight collection deps
+        run: |
+          pip install --upgrade pip
+          pip install requests pandas python-dotenv tqdm
 
       - name: Create .env
         run: echo "DART_API_KEY=${{ secrets.DART_API_KEY }}" > .env

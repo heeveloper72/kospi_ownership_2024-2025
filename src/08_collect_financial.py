@@ -13,6 +13,7 @@ H1(2014 상장 × 지분율) / H5(재벌 × 개혁) 가설의 공통 통제변�
 """
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_PATH = DATA_RAW / "financial_checkpoint.json"
 OUTPUT_PATH = DATA_RAW / "financial_raw.csv"
 YEARS = list(range(2015, 2026))
+
+# GitHub Actions 6h timeout 직전에 안전 종료 (finally 블록 정상 실행 보장)
+# 5h25m 후 break → upload/auto-trigger 단계가 정상 실행될 25분 여유 확보
+MAX_RUNTIME_SEC = int(os.environ.get("STEP8_MAX_RUNTIME_SEC", 5 * 3600 + 25 * 60))
 
 FIELDNAMES = [
     "corp_code", "corp_name", "market", "year", "fs_div_used",
@@ -141,8 +146,17 @@ def collect_financial() -> None:
     logger.info(f"오늘 API 호출(전체 스크립트 합산): {counter['calls']}/10,000")
 
     processed_this_run = 0
+    start_time = time.time()
     try:
         for corp_code, corp_name, market, year in remaining:
+            elapsed = time.time() - start_time
+            if elapsed > MAX_RUNTIME_SEC:
+                logger.warning(
+                    f"실행 시간 한도 도달 ({elapsed/3600:.1f}h > {MAX_RUNTIME_SEC/3600:.1f}h) "
+                    f"— 안전 종료. 내일 재실행하면 이어서 진행됩니다."
+                )
+                break
+
             if is_daily_limit_reached(counter):
                 logger.warning(
                     f"일일 한도 도달 — 잔여 {total - done}건. "
