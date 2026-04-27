@@ -303,3 +303,30 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 - **사용 중단된 패키지**: requirements.txt에서 즉시 제거 (잔존하면 버전 충돌 잠복)
 - **Heavy ML 패키지** (`hmmlearn`, `scikit-fda`): pip 설치 순서 및 네이티브 컴파일 의존성 주의
 - GitHub Actions secret 조건부 실행은 반드시 `env:` 블록 경유 패턴 사용
+
+---
+
+## CI 감사 기록 (2026-04-27) — Step 8 6h Timeout
+
+### 증상
+- step8-financial.yml: `The job has exceeded the maximum execution time of 6h0m0s` 반복
+
+### 근본 원인 (3가지 복합)
+| 원인 | 영향 |
+|---|---|
+| `pip install -r requirements.txt` 전체 설치 | scikit-fda/hmmlearn 네이티브 컴파일에 **5~10분 낭비** (collection 스크립트엔 불필요) |
+| Step 8 = CFS+OFS 2-call 패턴 | API 응답이 느릴 때 1 task당 평균 1.2~2 calls × 1~2초 → 10,000 calls가 4~6h 소요 |
+| 스크립트 내부 runtime guard 없음 | 6h 도달 시 GH Actions 강제 kill → `finally` 블록 정상 실행 보장 부족 |
+
+### 수정 (commit f15e2f2)
+1. **경량 install**: `pip install requests pandas python-dotenv tqdm` (전체 requirements 대체)
+2. **MAX_RUNTIME_SEC = 5h25m**: 스크립트 내부 안전 종료 → 25분 여유로 finally + upload + auto-trigger
+3. **timeout-minutes: 350**: 워크플로우 명시 (5h50m, GH 기본 6h 미만)
+4. **schedule 활성화**: 매일 UTC 03:00 — 다음날 자동 재개 (수동 트리거 불필요)
+5. **step1c도 동일 패턴 적용**: 동일 DART 수집 패턴 미연 방지
+
+### 다른 워크플로우 점검 결과
+- **Step 3 (treasury+total_shares)**: 1 call/task 패턴, 일일 10,000 calls = ~2.8h. 6h 여유. **수정 불필요**
+- **Step 4 (minority)**: 1 call/task. 6h 여유. 수정 불필요
+- **Step 5/6/7 (정제·분석·시각화)**: 분 단위 실행. timeout 무관
+- **Step 9 (KRX)**: 연도별 일괄 호출 (11회 호출), 매우 빠름. timeout 무관
