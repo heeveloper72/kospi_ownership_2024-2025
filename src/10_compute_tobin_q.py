@@ -76,10 +76,15 @@ def load_financial() -> pd.DataFrame:
         raise FileNotFoundError(
             f"{path} 없음 — Step 8(08_collect_financial.py)을 먼저 실행하세요."
         )
-    df = pd.read_csv(path, dtype=str)
-    logger.info(f"financial_raw.csv: {len(df):,}행 로드")
+    df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+    # BOM 제거 방어 — 컬럼명에 ﻿ 포함 가능성
+    df.columns = [c.lstrip("﻿").strip() for c in df.columns]
+    logger.info(f"financial_raw.csv: {len(df):,}행, 컬럼: {list(df.columns)[:6]}")
 
     for col in ["total_assets", "total_liabilities", "total_equity", "revenue", "operating_income"]:
+        if col not in df.columns:
+            logger.warning(f"  컬럼 누락: {col} — NaN으로 채움")
+            df[col] = np.nan
         df[col] = df[col].apply(_parse_amount)
 
     # (corp_code, year) 중복 시 total_assets 큰 행 우선 (연결/개별 혼재 방어)
@@ -99,9 +104,14 @@ def load_market_cap() -> pd.DataFrame:
         raise FileNotFoundError(
             f"{path} 없음 — Step 9(09_collect_market_cap.py)를 먼저 실행하세요."
         )
-    df = pd.read_csv(path, dtype=str)
-    logger.info(f"market_cap_raw.csv: {len(df):,}행 로드")
+    df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+    df.columns = [c.lstrip("﻿").strip() for c in df.columns]
+    logger.info(f"market_cap_raw.csv: {len(df):,}행, 컬럼: {list(df.columns)}")
 
+    for col in ["market_cap", "shares"]:
+        if col not in df.columns:
+            logger.warning(f"  컬럼 누락: {col} — NaN으로 채움")
+            df[col] = np.nan
     df["market_cap"] = df["market_cap"].apply(_parse_market_cap)
     df["shares"] = df["shares"].apply(_parse_market_cap)
     df["year"] = df["year"].astype(str)
@@ -203,7 +213,8 @@ def main() -> None:
     # 소유구조 패널과 병합 가능 여부 확인
     ownership_path = DATA_PROCESSED / "ownership_panel.csv"
     if ownership_path.exists():
-        df_own = pd.read_csv(ownership_path, dtype={"corp_code": str, "year": str})
+        df_own = pd.read_csv(ownership_path, dtype={"corp_code": str, "year": str}, encoding="utf-8-sig")
+        df_own.columns = [c.lstrip("﻿").strip() for c in df_own.columns]
         merged = df_own.merge(
             df[["corp_code", "year", "tobin_q", "leverage", "size", "roa",
                 "roe", "market_to_book", "market_cap", "total_assets"]],

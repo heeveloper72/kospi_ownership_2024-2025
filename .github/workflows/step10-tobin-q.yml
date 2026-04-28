@@ -70,7 +70,7 @@ jobs:
         run: |
           mkdir -p data/processed
           ARTIFACT_ID=$(gh api \
-            "repos/${{ github.repository }}/actions/artifacts?name=step5-ownership-panel&per_page=1" \
+            "repos/${{ github.repository }}/actions/artifacts?name=step5-panel-data&per_page=1" \
             --jq '.artifacts[0].id // empty')
           if [ -n "$ARTIFACT_ID" ]; then
             gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/step5.zip
@@ -84,6 +84,7 @@ jobs:
         run: python src/10_compute_tobin_q.py
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: step10-financial-panel
@@ -92,6 +93,7 @@ jobs:
             data/processed/ownership_financial_panel.csv
           retention-days: 90
           overwrite: true
+          if-no-files-found: warn
 
       - name: Summary
         if: always()

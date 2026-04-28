@@ -33,7 +33,7 @@ jobs:
         run: |
           mkdir -p data/processed
           ARTIFACT_ID=$(gh api \
-            "repos/${{ github.repository }}/actions/artifacts?name=step5-ownership-panel&per_page=1" \
+            "repos/${{ github.repository }}/actions/artifacts?name=step5-panel-data&per_page=1" \
             --jq '.artifacts[0].id // empty')
           if [ -z "$ARTIFACT_ID" ]; then
             echo "::error::Step 5 아티팩트 없음 — 먼저 step5-clean-merge.yml 실행 필요"
