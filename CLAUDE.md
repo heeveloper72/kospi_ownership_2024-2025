@@ -153,32 +153,15 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 | Step | 상태 | 체크포인트 | 비고 |
 |------|------|-----------|------|
 | Step 1 | ✅ 완료 | 2,661개 | listed_corps.csv |
-| Step 1b | ⏳ 준비 | — | KRX KIND 상장일 수집, 즉시 실행 가능 (인증키 불필요) |
-| Step 1c | ⏳ 준비 | — | DART company.json 기업상세, Step 8 완료 후 자동 시작 |
+| Step 1b | ✅ 완료 | — | KRX KIND 상장일 수집 완료 |
+| Step 1c | 🔄 진행 중 | — | Step 8 완료 후 자동 트리거됨, <1일 소요 |
 | Step 2 | ✅ 완료 | 29,271/29,271 | ownership_raw.csv 정상 |
-| Step 3 | 🔄 재수집 중 | ~39,500/58,542 (67%) | D+3, 04/26 완료 예정 |
-| Step 4 | ⏳ 대기 | — | Step 3 완료 후 auto-chain |
-| Step 5~7 | ⏳ 대기 | — | Step 4 완료 후 auto-chain |
-| Step 8 | ⏳ 대기 | — | Step 4 완료 후 auto-chain, ~04/30 완료 예정 |
-| Step 9 | ⏳ KRX 승인 대기 | — | 주식(sto) 이용신청 승인 후 수동 실행 |
-
-### Step 3 재수집 타임라인
-- 총 호출 수: 29,271 × 2 endpoints = **58,542건**
-- 일일 예산: 10,000건 (03 + 03b 공유)
-- 예상 소요: **6일** (2026-04-26 완료 예정)
-
-**예상 완료 흐름:**
-```
-04/21 (D+0)  수동 force_reset=true → ~9,500건
-04/22 (D+1)  schedule 01:00 UTC → 누적 19,500건
-04/23 (D+2)  → 29,500건 (03 endpoint 완료, 03b 시작)
-04/24 (D+3)  → 39,500건  ← 현재
-04/25 (D+4)  → 49,500건
-04/26 (D+5)  → 58,542건 (03b 완료)
-04/26        auto-chain: Step 4(대부분 skip) → Step 5+Step 8 병렬
-04/27~04/30  Step 8 수집 (재무데이터 ~29,271건, ~4일)
-04/30+       Step 1c 자동 시작 (기업상세 ~2,661건, <1일)
-```
+| Step 3 | ✅ 완료 | 58,542/58,542 | treasury_raw.csv + total_shares_raw.csv |
+| Step 4 | ✅ 완료 | — | minority_raw.csv |
+| Step 5~7 | ✅ 완료 | — | ownership_panel.csv + 분석 + 차트 |
+| Step 8 | ✅ 완료 | 29,271/29,271 | financial_raw.csv |
+| Step 9 | ✅ 완료 | — | market_cap_raw.csv (KRX 2015~2025) |
+| Step 10 | ⏳ 준비 | — | Tobin Q 계산, 수동 트리거 (`step10-tobin-q.yml`) |
 
 ---
 
@@ -186,13 +169,13 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 
 | 가설 | 필요 데이터 | 현재 상태 | 추가 수집 호출 |
 |------|-----------|----------|------------|
-| **H4** (클러스터 지속성) | `largest_pct, related_pct, treasury_pct, friendly_pct` 시계열 | ✅ Step 3 완료 후 충분 | **0건** |
-| **H1** (2014 상장 × 지분율) | + 상장일, 재무지표 | ❌ 미수집 | ~32,000건 |
-| **H5** (재벌 × 개혁) | + 재벌명단, 재무지표 | ❌ 미수집 + 수작업 | ~29,000건 |
+| **H4** (클러스터 지속성) | `largest_pct, related_pct, treasury_pct, friendly_pct` 시계열 | ✅ Step 6 진행 중 | **0건** |
+| **H3** (우호지분 × Tobin Q) | + 시가총액(KRX) ✅ + 재무지표 ✅ | ⏳ Step 10 준비 (수동 트리거 필요) | **0건** |
+| **H1** (2014 상장 × 지분율) | + 상장일 ✅ + 재무지표 ✅ + 기업상세(1c) | 🔄 Step 1c 완료 후 분석 가능 | **0건** |
+| **H5** (재벌 × 개혁) | + 재무지표 ✅ + 재벌명단(수작업) | ❌ 재벌 명단 수집 필요 | **0건 (수작업)** |
 | **H2** (인적분할 DiD) | + 인적분할 이벤트 | ❌ 미수집 | ~500건 |
-| **H3** (우호지분 × Tobin Q) | + 시가총액(KRX), 재무지표 | ❌ 미수집 | ~29,000 (DART) + KRX 병렬 |
 
-> **H4 우선 원칙:** Step 3 완료 즉시(4/27) 현재 데이터로 검정 가능 — 추가 API 호출 없음.
+> **현재 데이터 완비 상태:** Step 1~9 완료, API 추가 호출 없이 H3·H4 즉시 분석 가능.
 
 ---
 
@@ -200,50 +183,50 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 
 일일 10,000건 한도를 고려한 **순차 수집 계획** (Step 3 완료 이후):
 
-### Phase A — H4 분석 (API 호출 불필요)
-- **시점:** 2026-04-27
-- **작업:** `06_analyze.py`에 PCA + GMM 클러스터링 추가, `07_visualize.py`에 클러스터 분포 차트 추가
-- **산출:** 클러스터 레이블 + Markov 전이행렬
+### Phase A — H4 분석 ✅ 구현 완료, 실행 중
+- **상태:** `step6-analyze.yml` 진행 중
+- **산출:** `cluster_labels_by_year.csv`, `bic_aic_scores.csv`, `clustering_ari_matrix.csv`
 
-### Phase B — 재무데이터 수집 (H1·H5 공통 통제변수)
-- **시점:** 2026-04-26 ~ 04-30 (Step 4 완료 후 자동 시작)
-- **호출 수:** 29,271건 (`fnlttSinglAcntAll`)
-- **수집 필드:** 자산총계, 부채총계, 자본총계, 매출액, 영업이익
-- **구현:** ✅ `src/08_collect_financial.py` + `step8-financial.yml` (자동 체인)
+### Phase B — 재무데이터 수집 ✅ 완료
+- **결과:** `financial_raw.csv` (29,271 기업-연도, CFS/OFS)
+- **구현:** `src/08_collect_financial.py` + `step8-financial.yml`
 
-### Phase C — 기업 상세정보 수집 (H1 IV, H5 보조)
-- **시점:** 2026-04-30 ~ 05-01 (Step 8 완료 후 자동 시작)
-- **호출 수:** 2,661건 (`company.json`)
-- **수집 필드:** `est_dt`(설립일), `induty_code`(업종), `acc_mt`(결산월)
-- **구현:** ✅ `src/01c_get_corp_details.py` + `step1c-corp-details.yml` (자동 체인)
-- **KRX 상장일:** ✅ `01b_get_listing_dates.py` + `step1b-listing-dates.yml` (DART 무관, 즉시 실행 가능)
+### Phase C — 기업 상세정보 수집 🔄 진행 중
+- **상태:** Step 8 완료 후 자동 트리거, 2,661건 < 1일
+- **구현:** `src/01c_get_corp_details.py` + `step1c-corp-details.yml`
+- **KRX 상장일:** ✅ `01b_get_listing_dates.py` 완료
+
+### Phase E — Tobin Q 계산 ⏳ 준비 완료 (수동 트리거 필요)
+- **상태:** `src/10_compute_tobin_q.py` + `step10-tobin-q.yml` 구현 완료
+- **입력:** `financial_raw.csv` ✅ + `market_cap_raw.csv` ✅
+- **출력:** `financial_panel.csv` + `ownership_financial_panel.csv`
+- **변수:** `tobin_q`, `leverage`, `size`, `roa`, `roe`, `market_to_book`
+- **실행:** Actions 탭 → `step10-tobin-q.yml` 수동 트리거
 
 ### Phase D — 인적분할 이벤트 (H2 처리집단)
 - **시점:** 2026-05-02 (1일)
 - **호출 수:** ~500건 (`majorReport` 검색, 인적분할 보고서만)
 - **구현:** 미구현 — 신규 스크립트 + `spin_off_events.csv`
 
-### Phase E — 시가총액 (H3 Tobin Q)
-- **시점:** KRX 서비스 승인 즉시 (DART API 무관, 병렬 진행)
-- KRX OpenAPI `stk_bydd_trd` / `ksq_bydd_trd`
-- **구현:** ✅ `src/09_collect_market_cap.py` + `step9-market-cap.yml` (KRX AUTH_KEY 승인 대기 중)
-
-### 총 소요 요약
-- Step 3 완료: 4/26
-- 추가 DART 호출: 29,271 + 2,661 + ~500 = ~32,432건 → 약 4일
-- **전체 분석 가능 시점: 2026-05-02~05 전후**
+### 총 소요 요약 (2026-04-28 기준)
+- **추가 API 호출 없이 분석 가능:** H3 (Tobin Q), H4 (클러스터링), H1 (Step 1c 완료 후)
+- **잔여 작업:** Phase D (인적분할 ~500건), H5 재벌 명단 (수작업)
 
 ---
 
 ## 우선순위 및 권고
 
-1. **Step 3 재수집 중** (04/24 D+3, ~67%) — 04/26 완료 예정, 현재 상태 유지
+1. ~~Step 3 재수집~~ ✅ 완료 (2026-04-26)
 2. ~~카나리아 L158–159 수정~~ ✅ 완료 (2026-04-22)
-3. **Step 1b (KRX 상장일)** — 즉시 실행 가능, Actions 탭에서 수동 트리거 (`step1b-listing-dates.yml`)
-4. **Step 8/1c 자동 체인 완성** ✅ (2026-04-24) — Step 3→4→5+8→1c 전 파이프라인 자동화
-5. **H4 분석** — Step 3/4/5 완료(~04/26-27) 후 즉시 실행 가능 (추가 API 없음)
-6. **Step 9 (KRX 시총)** — KRX 주식(sto) 서비스 이용신청 승인 후 수동 실행
-7. **Phase D (인적분할 H2)** — 미구현, ~05/02 착수 예정
+3. ~~Step 1b (KRX 상장일)~~ ✅ 완료
+4. ~~Step 8/1c 자동 체인 완성~~ ✅ 완료 (2026-04-24)
+5. ~~Step 8 (재무데이터)~~ ✅ 완료 (2026-04-27)
+6. ~~Step 9 (KRX 시총)~~ ✅ 완료
+7. **Step 10 (Tobin Q 계산)** — `step10-tobin-q.yml` 수동 트리거 (즉시 가능)
+8. **H4 분석** — `step6-analyze.yml` 진행 중, 완료 후 결과 확인
+9. **Step 1c 완료 확인** — 자동 트리거됨, Actions 탭 확인
+10. **Phase D (인적분할 H2)** — 미구현, ~05/02 착수 예정
+11. **H5 재벌 명단** — 수작업, 공정위 기업집단 포털에서 수집 필요
 
 ---
 

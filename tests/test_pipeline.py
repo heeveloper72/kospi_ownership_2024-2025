@@ -1,4 +1,4 @@
-"""픽스처 데이터로 05→06→07 파이프라인 통합 테스트."""
+"""픽스처 데이터로 05→06→07→10 파이프라인 통합 테스트."""
 
 import importlib.util
 import shutil
@@ -143,3 +143,68 @@ class TestVisualize:
         for i in range(1, 6):
             chart = list(pipeline_dirs["output"].glob(f"chart{i}_*.png"))
             assert len(chart) == 1, f"chart{i}_*.png 가 생성되어야 함"
+
+
+# ─────────────────────────────────────────────
+# 10_compute_tobin_q.py
+# ─────────────────────────────────────────────
+
+class TestTobinQ:
+    def test_creates_financial_panel(self, pipeline_dirs, monkeypatch):
+        mod = load_module("tobin_q", "10_compute_tobin_q.py")
+        monkeypatch.setattr(mod, "DATA_RAW", pipeline_dirs["raw"])
+        monkeypatch.setattr(mod, "DATA_PROCESSED", pipeline_dirs["processed"])
+
+        mod.main()
+
+        out = pipeline_dirs["processed"] / "financial_panel.csv"
+        assert out.exists(), "financial_panel.csv가 생성되어야 함"
+
+        df = pd.read_csv(out)
+        expected = {"corp_code", "year", "total_assets", "total_liabilities",
+                    "tobin_q", "leverage", "size", "roa"}
+        assert expected.issubset(df.columns)
+        assert len(df) > 0
+
+    def test_tobin_q_positive_for_valid_rows(self, pipeline_dirs, monkeypatch):
+        mod = load_module("tobin_q2", "10_compute_tobin_q.py")
+        monkeypatch.setattr(mod, "DATA_RAW", pipeline_dirs["raw"])
+        monkeypatch.setattr(mod, "DATA_PROCESSED", pipeline_dirs["processed"])
+
+        mod.main()
+
+        df = pd.read_csv(pipeline_dirs["processed"] / "financial_panel.csv")
+        valid = df.dropna(subset=["tobin_q"])
+        assert len(valid) > 0, "Tobin Q 유효값이 하나 이상 있어야 함"
+        # Tobin Q > 0 (시가총액 + 부채 > 0, 자산 > 0)
+        assert (valid["tobin_q"] > 0).all()
+
+    def test_leverage_between_0_and_1(self, pipeline_dirs, monkeypatch):
+        mod = load_module("tobin_q3", "10_compute_tobin_q.py")
+        monkeypatch.setattr(mod, "DATA_RAW", pipeline_dirs["raw"])
+        monkeypatch.setattr(mod, "DATA_PROCESSED", pipeline_dirs["processed"])
+
+        mod.main()
+
+        df = pd.read_csv(pipeline_dirs["processed"] / "financial_panel.csv")
+        valid = df.dropna(subset=["leverage"])
+        assert ((valid["leverage"] >= 0) & (valid["leverage"] <= 1)).all()
+
+    def test_creates_ownership_financial_panel_when_panel_exists(self, pipeline_dirs, monkeypatch):
+        # 먼저 ownership_panel.csv 생성
+        clean_mod = load_module("clean_merge3", "05_clean_merge.py")
+        monkeypatch.setattr(clean_mod, "DATA_RAW", pipeline_dirs["raw"])
+        monkeypatch.setattr(clean_mod, "DATA_PROCESSED", pipeline_dirs["processed"])
+        clean_mod.main()
+
+        mod = load_module("tobin_q4", "10_compute_tobin_q.py")
+        monkeypatch.setattr(mod, "DATA_RAW", pipeline_dirs["raw"])
+        monkeypatch.setattr(mod, "DATA_PROCESSED", pipeline_dirs["processed"])
+
+        mod.main()
+
+        out = pipeline_dirs["processed"] / "ownership_financial_panel.csv"
+        assert out.exists(), "ownership_financial_panel.csv가 생성되어야 함"
+        df = pd.read_csv(out)
+        assert "tobin_q" in df.columns
+        assert "largest_pct" in df.columns
