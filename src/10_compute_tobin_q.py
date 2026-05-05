@@ -98,12 +98,18 @@ def load_financial() -> pd.DataFrame:
     return df
 
 
-def load_market_cap() -> pd.DataFrame:
+def load_market_cap() -> pd.DataFrame | None:
+    """market_cap_raw.csv 로드. 파일 없으면 None 반환 (Tobin Q는 NaN 처리).
+
+    Step 9 미완료 시에도 financial_panel.csv 생성은 계속 진행한다.
+    """
     path = DATA_RAW / "market_cap_raw.csv"
     if not path.exists():
-        raise FileNotFoundError(
-            f"{path} 없음 — Step 9(09_collect_market_cap.py)를 먼저 실행하세요."
+        logger.warning(
+            f"market_cap_raw.csv 없음 — Tobin Q·market_to_book·market_cap은 NaN으로 채움. "
+            f"Step 9 완료 후 재실행하면 완전한 데이터 생성."
         )
+        return None
     df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
     df.columns = [c.lstrip("﻿").strip() for c in df.columns]
     logger.info(f"market_cap_raw.csv: {len(df):,}행, 컬럼: {list(df.columns)}")
@@ -193,9 +199,15 @@ def main() -> None:
     df_fin = load_financial()
     df_mcap = load_market_cap()
 
-    # corp_code + year 기준 병합 (left join — 재무 기준, 시가총액 없는 연도 NaN 허용)
-    df = df_fin.merge(df_mcap, on=["corp_code", "year"], how="left")
-    logger.info(f"병합 후: {len(df):,}행")
+    if df_mcap is not None:
+        df = df_fin.merge(df_mcap, on=["corp_code", "year"], how="left")
+        logger.info(f"병합 후: {len(df):,}행")
+    else:
+        df = df_fin.copy()
+        df["market_cap"] = np.nan
+        df["shares"] = np.nan
+        df["snapshot_date"] = np.nan
+        logger.warning("market_cap 컬럼 NaN — Tobin Q 계산 불가, 나머지 재무비율만 계산")
 
     df = compute_ratios(df)
 
