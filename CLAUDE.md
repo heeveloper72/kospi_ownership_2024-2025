@@ -154,14 +154,19 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 |------|------|-----------|------|
 | Step 1 | ✅ 완료 | 2,661개 | listed_corps.csv |
 | Step 1b | ✅ 완료 | — | KRX KIND 상장일 수집 완료 |
-| Step 1c | 🔄 진행 중 | — | Step 8 완료 후 자동 트리거됨, <1일 소요 |
+| Step 1c | ✅ 완료 | — | corp_details.csv (설립일·업종·결산월) |
 | Step 2 | ✅ 완료 | 29,271/29,271 | ownership_raw.csv 정상 |
 | Step 3 | ✅ 완료 | 58,542/58,542 | treasury_raw.csv + total_shares_raw.csv |
 | Step 4 | ✅ 완료 | — | minority_raw.csv |
 | Step 5~7 | ✅ 완료 | — | ownership_panel.csv + 분석 + 차트 |
 | Step 8 | ✅ 완료 | 29,271/29,271 | financial_raw.csv |
 | Step 9 | ✅ 완료 | — | market_cap_raw.csv (KRX 2015~2025) |
-| Step 10 | ⏳ 준비 | — | Tobin Q 계산, 수동 트리거 (`step10-tobin-q.yml`) |
+| Step 10 | ✅ 완료 | — | financial_panel.csv + ownership_financial_panel.csv |
+| Step 11 | ⏳ 준비 | — | H3 Tobin Q 회귀 (`src/11_analyze_h3.py`) |
+| Step 12 | ⏳ 준비 | — | H1 post2014 회귀 (`src/12_analyze_h1.py`) |
+| Step 13 | ⏳ 준비 | — | H5 재벌 × 개혁 DiD (`src/13_analyze_h5.py`) |
+
+> **회귀분석 통합 워크플로우:** `step11-13-hypotheses.yml` 1회 트리거로 H1·H3·H5 전체 실행.
 
 ---
 
@@ -169,13 +174,13 @@ Step 2/3/4 YML의 `workflow_dispatch` 입력으로 `force_reset: true` 체크박
 
 | 가설 | 필요 데이터 | 현재 상태 | 추가 수집 호출 |
 |------|-----------|----------|------------|
-| **H4** (클러스터 지속성) | `largest_pct, related_pct, treasury_pct, friendly_pct` 시계열 | ✅ Step 6 진행 중 | **0건** |
-| **H3** (우호지분 × Tobin Q) | + 시가총액(KRX) ✅ + 재무지표 ✅ | ⏳ Step 10 준비 (수동 트리거 필요) | **0건** |
-| **H1** (2014 상장 × 지분율) | + 상장일 ✅ + 재무지표 ✅ + 기업상세(1c) | 🔄 Step 1c 완료 후 분석 가능 | **0건** |
-| **H5** (재벌 × 개혁) | + 재무지표 ✅ + 재벌명단(수작업) | ❌ 재벌 명단 수집 필요 | **0건 (수작업)** |
+| **H4** (클러스터 지속성) | `largest_pct, related_pct, treasury_pct, friendly_pct` 시계열 | ✅ Step 6 완료 | **0건** |
+| **H3** (우호지분 × Tobin Q) | + 시가총액(KRX) ✅ + 재무지표 ✅ | ✅ Step 11 코드 작성 완료 | **0건** |
+| **H1** (2014 상장 × 지분율) | + 상장일 ✅ + 재무지표 ✅ + 기업상세(1c) | ✅ Step 12 코드 작성 완료 | **0건** |
+| **H5** (재벌 × 개혁) | + 재무지표 ✅ + 재벌명단(stub) | ✅ Step 13 코드 작성 완료 (재벌 stub 50그룹) | **0건 (수작업 stub 검증 필요)** |
 | **H2** (인적분할 DiD) | + 인적분할 이벤트 | ❌ 미수집 | ~500건 |
 
-> **현재 데이터 완비 상태:** Step 1~9 완료, API 추가 호출 없이 H3·H4 즉시 분석 가능.
+> **현재 분석 가능:** H1·H3·H4·H5 모두 추가 API 호출 0건으로 분석 가능. H2만 미착수.
 
 ---
 
